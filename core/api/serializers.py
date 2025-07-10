@@ -5,6 +5,7 @@ User = get_user_model()
 
 class UserProfileSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
+
     class Meta:
         model = User
         fields = [
@@ -51,3 +52,64 @@ class UserProfileSerializer(serializers.ModelSerializer):
             instance.set_password(password)
         instance.save()
         return instance
+
+# ⬇️ SOTTO aggiungi questo
+
+class UserRegistrationSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'email',
+            'password',
+            'first_name',
+            'last_name',
+            'accepted_terms',
+            'accepted_privacy'
+        ]
+
+    def validate(self, attrs):
+        if not attrs.get('accepted_terms'):
+            raise serializers.ValidationError({"accepted_terms": "Devi accettare i termini e condizioni."})
+        if not attrs.get('accepted_privacy'):
+            raise serializers.ValidationError({"accepted_privacy": "Devi accettare la privacy policy."})
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop('password')
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user
+
+#registrazione pubblica
+class UserRegistrationSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id',
+            'email',
+            'password',
+            'first_name',
+            'last_name',
+            'accepted_terms',
+            'accepted_privacy'
+        ]
+
+    def validate(self, attrs):
+        if not attrs.get('accepted_terms'):
+            raise serializers.ValidationError({"accepted_terms": "Devi accettare i termini e condizioni."})
+        if not attrs.get('accepted_privacy'):
+            raise serializers.ValidationError({"accepted_privacy": "Devi accettare la privacy policy."})
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop('password')
+        user = User(**validated_data)
+        user.set_password(password)
+        user.save()
+        return user

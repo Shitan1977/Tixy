@@ -7,7 +7,8 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from rest_framework.routers import DefaultRouter
-from .views import UserProfileViewSet
+from .views import UserProfileViewSet, UserRegistrationView
+
 
 # Rotta di test
 @api_view(['GET'])
@@ -27,4 +28,6 @@ urlpatterns = [
     path('hello/', hello_world, name='hello_world'),
     # API UserProfile
     path('', include(router.urls)),
+    #registrazione utenti api pubblica
+    path('register/', UserRegistrationView.as_view(), name='user-register'),
 ]

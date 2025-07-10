@@ -1,8 +1,8 @@
-from rest_framework import viewsets, permissions, status
+from rest_framework import viewsets, permissions, status, generics
 from rest_framework.response import Response
 from rest_framework.decorators import action, api_view, permission_classes
 from django.contrib.auth import get_user_model
-from .serializers import UserProfileSerializer
+from .serializers import UserProfileSerializer, UserRegistrationSerializer
 
 User = get_user_model()
 
@@ -43,3 +43,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         user.is_active = False
         user.save()
         return Response({"status": "Account disattivato"}, status=status.HTTP_204_NO_CONTENT)
+
+#registrazione pubblica
+class UserRegistrationView(generics.CreateAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserRegistrationSerializer
+    permission_classes = [permissions.AllowAny]
