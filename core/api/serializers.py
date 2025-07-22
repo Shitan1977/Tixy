@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-
+from .models import Evento, Piattaforma, EventoPiattaforma
 User = get_user_model()
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -53,7 +53,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
-# ⬇️ SOTTO aggiungi questo
+
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
@@ -113,3 +113,48 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         user.set_password(password)
         user.save()
         return user
+
+
+#parte relative agli eventi
+
+class PiattaformaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Piattaforma
+        fields = ['id', 'nome', 'url_base']
+
+
+class EventoPiattaformaSerializer(serializers.ModelSerializer):
+    piattaforma = PiattaformaSerializer(read_only=True)
+
+    class Meta:
+        model = EventoPiattaforma
+        fields = [
+            'id',
+            'piattaforma',
+            'url_pagina_evento',
+            'disponibilità_biglietti',
+            'prezzo_minimo',
+            'timestamp_aggiornamento'
+        ]
+
+
+class EventoSerializer(serializers.ModelSerializer):
+    piattaforme_collegate = EventoPiattaformaSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Evento
+        fields = [
+            'id',
+            'nome_evento',
+            'descrizione',
+            'artista',
+            'data_ora',
+            'luogo',
+            'città',
+            'url_immagine',
+            'categoria',
+            'stato_disponibilità',
+            'attivo',
+            'timestamp_aggiornamento',
+            'piattaforme_collegate',
+        ]

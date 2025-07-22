@@ -57,3 +57,69 @@ class UserProfile(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.email})"
+
+# modello evento
+
+class Evento(models.Model):
+    CATEGORIE = [
+        ('concerto', 'Concerto'),
+        ('teatro', 'Teatro'),
+        ('sport', 'Sport'),
+        ('altro', 'Altro'),
+    ]
+
+    STATO_DISPONIBILITA = [
+        ('disponibile', 'Disponibile'),
+        ('sold_out', 'Sold Out'),
+    ]
+
+    nome_evento = models.CharField(max_length=255)
+    descrizione = models.TextField(blank=True)
+    artista = models.CharField(max_length=255)
+    data_ora = models.DateTimeField()
+    luogo = models.CharField(max_length=255)
+    città = models.CharField(max_length=100)
+    url_immagine = models.URLField(blank=True)
+    categoria = models.CharField(max_length=50, choices=CATEGORIE)
+    stato_disponibilità = models.CharField(max_length=20, choices=STATO_DISPONIBILITA, default='disponibile')
+    attivo = models.BooleanField(default=True)
+    timestamp_aggiornamento = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.nome_evento} - {self.data_ora.strftime('%d/%m/%Y')}"
+
+    class Meta:
+        ordering = ['-data_ora']
+
+#modello piattaforma
+
+class Piattaforma(models.Model):
+    nome = models.CharField(max_length=100, unique=True)
+    url_base = models.URLField()
+
+    def __str__(self):
+        return self.nome
+
+    class Meta:
+        verbose_name_plural = "Piattaforme"
+
+# evienti piattaforma
+
+class EventoPiattaforma(models.Model):
+    STATO_BIGLIETTI = [
+        ('disponibile', 'Disponibile'),
+        ('sold_out', 'Sold Out'),
+    ]
+
+    evento = models.ForeignKey('Evento', on_delete=models.CASCADE, related_name='piattaforme_collegate')
+    piattaforma = models.ForeignKey('Piattaforma', on_delete=models.CASCADE, related_name='eventi_collegati')
+    url_pagina_evento = models.URLField()
+    disponibilità_biglietti = models.CharField(max_length=20, choices=STATO_BIGLIETTI, default='disponibile')
+    prezzo_minimo = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    timestamp_aggiornamento = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.evento.nome_evento} su {self.piattaforma.nome}"
+
+    class Meta:
+        unique_together = ('evento', 'piattaforma')

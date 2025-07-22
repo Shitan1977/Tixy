@@ -7,7 +7,7 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from rest_framework.routers import DefaultRouter
-from .views import UserProfileViewSet, UserRegistrationView
+from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet
 
 
 # Rotta di test
@@ -19,7 +19,9 @@ def hello_world(request):
 # Router per UserProfile
 router = DefaultRouter()
 router.register(r'users', UserProfileViewSet, basename='user')
-
+router = DefaultRouter()
+router.register(r'users', UserProfileViewSet, basename='user')
+router.register(r'eventi', EventoViewSet, basename='evento')
 urlpatterns = [
     # JWT Auth
     path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
@@ -30,4 +32,5 @@ urlpatterns = [
     path('', include(router.urls)),
     #registrazione utenti api pubblica
     path('register/', UserRegistrationView.as_view(), name='user-register'),
+
 ]
