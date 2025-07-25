@@ -103,7 +103,7 @@ class Piattaforma(models.Model):
     class Meta:
         verbose_name_plural = "Piattaforme"
 
-# evienti piattaforma
+# modello eventopiattaforma
 
 class EventoPiattaforma(models.Model):
     STATO_BIGLIETTI = [
@@ -123,3 +123,13 @@ class EventoPiattaforma(models.Model):
 
     class Meta:
         unique_together = ('evento', 'piattaforma')
+
+
+# modello biglietto
+
+class Biglietto(models.Model):
+    FORMATO_FILE = [('pdf','PDF'),('image','Image')]
+    tipo_biglietto = models.CharField(max_length=4,choices=FORMATO_FILE)
+    data_caricamento = models.DateTimeField(auto_now_add=True)
+    is_valid = models.BooleanField(default=False)
+    path_file = models.FileField(upload_to='uploads/%Y/%m/%d/%H')

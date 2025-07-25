@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Evento, Piattaforma, EventoPiattaforma
+from .models import Evento, Piattaforma, EventoPiattaforma, Biglietto
+
 User = get_user_model()
 
 class UserProfileSerializer(serializers.ModelSerializer):
@@ -84,7 +85,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         user.save()
         return user
 
-#registrazione pubblica
+# registrazione pubblica
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
 
@@ -115,7 +116,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         return user
 
 
-#parte relative agli eventi
+#parte relativa agli eventi
 
 class PiattaformaSerializer(serializers.ModelSerializer):
     class Meta:
@@ -158,3 +159,11 @@ class EventoSerializer(serializers.ModelSerializer):
             'timestamp_aggiornamento',
             'piattaforme_collegate',
         ]
+
+# Parte dei File
+
+class FileUpload(serializers.ModelSerializer):
+    class Meta:
+        model = Biglietto
+        fields = '__all__'
+        read_only_fields = ['id','tipo_biglietto','data_caricamento','is_valid','path_file']
