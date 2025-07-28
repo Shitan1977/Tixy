@@ -4,7 +4,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import (TokenObtainPairView,TokenRefreshView)
 from rest_framework.routers import DefaultRouter
-from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet
+from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView
 
 
 # Rotta di test
@@ -19,6 +19,9 @@ router.register(r'users', UserProfileViewSet, basename='user')
 router = DefaultRouter()
 router.register(r'users', UserProfileViewSet, basename='user')
 router.register(r'eventi', EventoViewSet, basename='evento')
+
+router.register(r'biglietti',BigliettoUploadView)
+
 urlpatterns = [
 
     # JWT Auth
@@ -33,5 +36,8 @@ urlpatterns = [
 
     #registrazione utenti api pubblica
     path('register/', UserRegistrationView.as_view(), name='user-register'),
+
+    #Upload dei biglietti
+    path('biglietti/',BigliettoUploadView.as_view(), name='upload-biglietti'),
 
 ]

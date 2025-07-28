@@ -5,8 +5,7 @@ from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import Evento, Biglietto
-from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, FileUpload
-from .file_validators import *
+from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer
 
 User = get_user_model()
 
@@ -72,14 +71,7 @@ class EventoViewSet(viewsets.ModelViewSet):
 
 
 # Parte dell'upload dei File
-class FileUploadView(viewsets.ModelViewSet):
-
+class BigliettoUploadView(viewsets.ModelViewSet):
     queryset = Biglietto.objects.all()
-
-    def post(self, request):
-        serializer = FileUpload(data=request.data)
-        if serializer.is_valid():
-            instance = serializer.save()
-            result = processo_validazione(instance)
-            return Response(FileUpload(result).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    serializers_class = BigliettoUploadSerializer
+    permission_classes = IsAdminOrIsSelf

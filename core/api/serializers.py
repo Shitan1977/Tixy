@@ -162,8 +162,8 @@ class EventoSerializer(serializers.ModelSerializer):
 
 # Parte dei File
 
-class FileUpload(serializers.ModelSerializer):
+class BigliettoUploadSerializer(serializers.ModelSerializer):
     class Meta:
         model = Biglietto
-        fields = '__all__'
-        read_only_fields = ['id','tipo_biglietto','data_caricamento','is_valid','path_file']
+        fields = ['id','tipo_biglietto','titolo','data_caricamento','is_valid','path_file']
+        read_only_fields = ['id','data_caricamento']
