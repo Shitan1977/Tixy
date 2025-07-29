@@ -15,12 +15,12 @@ def hello_world(request):
 
 # Router per UserProfile
 router = DefaultRouter()
+
 router.register(r'users', UserProfileViewSet, basename='user')
-router = DefaultRouter()
-router.register(r'users', UserProfileViewSet, basename='user')
+
 router.register(r'eventi', EventoViewSet, basename='evento')
 
-router.register(r'biglietti',BigliettoUploadView)
+router.register(r'biglietti',BigliettoUploadView, basename='biglietti')
 
 urlpatterns = [
 
@@ -36,8 +36,5 @@ urlpatterns = [
 
     #registrazione utenti api pubblica
     path('register/', UserRegistrationView.as_view(), name='user-register'),
-
-    #Upload dei biglietti
-    path('biglietti/',BigliettoUploadView.as_view(), name='upload-biglietti'),
 
 ]

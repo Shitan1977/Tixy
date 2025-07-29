@@ -13,8 +13,8 @@ mysqlclient==2.2.7
 packaging==25.0
 pikepdf==9.10.2
 pillow==11.3.0
+puremagic==1.30
 PyJWT==2.9.0
-python-magic==0.4.27
 pytz==2025.2
 PyYAML==6.0.2
 sqlparse==0.5.3

@@ -1,6 +1,7 @@
 from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
-from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.decorators import action
+from rest_framework.parsers import MultiPartParser, FormParser
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django_filters.rest_framework import DjangoFilterBackend
@@ -73,5 +74,10 @@ class EventoViewSet(viewsets.ModelViewSet):
 # Parte dell'upload dei File
 class BigliettoUploadView(viewsets.ModelViewSet):
     queryset = Biglietto.objects.all()
-    serializers_class = BigliettoUploadSerializer
-    permission_classes = IsAdminOrIsSelf
+    serializer_class = BigliettoUploadSerializer
+    #permission_classes = [IsAdminOrIsSelf]
+    parser_classes = [MultiPartParser, FormParser]
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['titolo','data_caricamento']
+    ordering_fields = ['data_caricamento']
+    filterset_fields = ['tipo_biglietto','titolo']

@@ -1,7 +1,5 @@
-from django.core.exceptions import ValidationError
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
-from .file_validators import  validation_process, get_file_type
 
 class UserProfileManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -131,38 +129,14 @@ class EventoPiattaforma(models.Model):
 
 class Biglietto(models.Model):
 
-    tipo_biglietto = models.CharField(max_length=5,editable=False)
-    titolo = models.CharField(max_length=255,blank=True,editable=False)
+    tipo_biglietto = models.CharField(max_length=5)
+    titolo = models.CharField(max_length=255,blank=True)
     data_caricamento = models.DateTimeField(auto_now_add=True)
-    is_valid = models.BooleanField(default=False,editable=False)
+    is_valid = models.BooleanField(default=False)
     path_file = models.FileField(upload_to='uploads/%Y/%m/%d/%H')
 
-    def clean(self):
-        super().clean()
-        file = self.path_file
-        if not file:
-            raise ValidationError('Devi caricare un file.')
-
-        try:
-            tipo = get_file_type(file)
-        except ValidationError as e:
-            raise ValidationError({'path_file': e.messages})
-
-        try:
-            validation_process(file)
-        except ValidationError as e:
-            raise ValidationError({'path_file': e.messages})
-
-        self.tipo_biglietto = tipo
-        self.is_valid = True
-
     def save(self,*args,**kwargs):
-        if self.path_file and not self.titolo :
+        if not self.titolo :
             self.titolo = self.path_file.name
-
-        try:
-            self.full_clean()
-        except ValidationError:
-            self.is_valid = False
 
         super().save(*args,**kwargs)

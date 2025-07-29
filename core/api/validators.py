@@ -1,10 +1,13 @@
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from PIL import Image, ImageOps
 from PIL.ExifTags import TAGS
 import pikepdf
-import magic
+import puremagic
 import re
+import os
+
 
 
 ALLOWED_MIME_TYPES = {
@@ -14,41 +17,54 @@ ALLOWED_MIME_TYPES = {
     'image/webp':'Image',
 }
 
-def trova_mime(file) -> str:
-    doc = file.read(2048)
-    mime = magic.from_buffer(doc,mime=True)
-    file.seek(0)
-    return mime
+def find_mime(file) -> str:
+    try:
+        mime_list = puremagic.magic_file(file)
+        txt_dir = settings.MEDIA_ROOT
+        os.makedirs(txt_dir, exist_ok=True)
+        txt_path = os.path.join(txt_dir,'tmp_mime.txt')
+        with open(txt_path,'w') as f:
+            for m in mime_list:
+                f.write(f'{m.mime_type}: confidence {m.confidence}\n')
+
+        for m in mime_list:
+            if m.mime_type and 0.85 < m.confidence < 1.00:
+                return m.mime_type
+    except:
+        raise ValidationError('File non accettato')
 
 def get_file_type(file) -> str:
-    mime = trova_mime(file)
+    mime = find_mime(file)
     try:
         return ALLOWED_MIME_TYPES[mime]
     except KeyError:
-        raise ValidationError('Formato file non ammesso')
+        raise ValidationError(f'Formato file non ammesso : {mime}')
 
 def validation_process(file):
-    mime = trova_mime(file)
+    type_file = get_file_type(file)
 
-    if mime == 'application/pdf':
-        validazione_pdf(file)
-    elif mime.startswith('image/'):
-        validazione_image(file)
+    if type_file == 'PDF':
+        pdf_validation(file)
+    elif type_file == 'Image':
+        image_validation(file)
     else:
-        raise ValidationError('File non ammesso')
+        raise ValidationError(f'File non ammesso : {type_file}')
 
-def controllo_data (creato,modificato,label):
+def date_check (created,modificated,label):
     now = timezone.now()
-    if creato in None and modificato is None:
+    if created is None and modificated is None:
         raise ValidationError(f'{label} - i Metadati sono vuoti.')
 
-    if creato and creato > now:
+    if not created and not modificated:
+        raise ValidationError(f'{label} - i Metadati sono vuoti.')
+
+    if created and created > now:
         raise ValidationError(f'{label} - la Data di Creazione è nel futuro.')
 
-    if modificato and modificato > now:
+    if modificated and modificated > now:
         raise ValidationError(f'{label} - la Data di Modifica è nel futuro.')
 
-    if creato and modificato and modificato < creato:
+    if created and modificated and modificated < created:
         raise ValidationError(f'{label} - la Data di Modifica precede la Data di Creazione')
 
 # Validazione dei PDF
@@ -63,24 +79,24 @@ def parse_pdf_date(date_str):
     except (ValueError, TypeError):
         return None
 
-def validazione_pdf(file):
+def pdf_validation(file):
     try:
         with pikepdf.open(file) as pdf:
             meta = pdf.open_metadata()
 
-            creato_raw = meta.get('xmp:CreationDate')
-            modifica_raw = meta.get('xmp:ModDate')
+            created_raw = meta.get('xmp:CreationDate')
+            modificated_raw = meta.get('xmp:ModDate')
 
-            creato = parse_pdf_date(creato_raw)
-            modificato = parse_pdf_date(modifica_raw)
+            created = parse_pdf_date(created_raw)
+            modificated = parse_pdf_date(modificated_raw)
 
-            controllo_data(creato,modificato,'PDF')
+            date_check(created,modificated,'PDF')
 
     except (pikepdf.PdfError, OSError) as e:
         raise ValidationError(f'Errore durante la lettura del PDF: {str(e)}')
 
 
-#Validazione delle Image
+#Validazione del Image
 def parse_exif_data(date_str):
     if not date_str:
         return None
@@ -92,7 +108,7 @@ def parse_exif_data(date_str):
     except (ValueError,TypeError):
         return None
 
-def validazione_image(file):
+def image_validation(file):
     try:
         with Image.open(file) as image:
             image = ImageOps.exif_transpose(image)
@@ -101,17 +117,17 @@ def validazione_image(file):
             if not exif:
                 raise ValidationError("Immagine priva di metadati EXIF.")
 
-            creato = None
-            modifica = None
+            created = None
+            modificated = None
 
             for tag_id, value in exif.items():
                 tag = TAGS.get(tag_id, tag_id)
                 if tag == 'DateTimeOriginal':
-                    creato = parse_exif_data(value)
+                    created = parse_exif_data(value)
                 elif tag in ('DateTime', 'DateTimeDigitized'):
-                    modifica = parse_exif_data(value)
+                    modificated = parse_exif_data(value)
 
-            controllo_data(creato,modifica,'Image')
+            date_check(created,modificated,'Image')
 
     except ValidationError:
         raise
