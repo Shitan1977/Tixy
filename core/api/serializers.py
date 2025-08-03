@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from rest_framework.exceptions import ValidationError
 from .models import Evento, Piattaforma, EventoPiattaforma, Biglietto
-from .validators import get_file_type, validation_process
+
 
 User = get_user_model()
 
@@ -169,23 +169,3 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
         model = Biglietto
         fields = '__all__'
         read_only_fields = ['id','tipo_biglietto','is_valid','data_caricamento']
-
-    def validate_path_file(self,value):
-        try:
-            file_type= get_file_type(value)
-            validation_process(value)
-            return value
-        except ValidationError as e:
-            raise serializers.ValidationError(e.messages)
-
-    def create(self, validated_data):
-        file = validated_data['path_file']
-
-        type = get_file_type(file)
-        validated_data['tipo_biglietto'] = type
-        validated_data['is_valid'] = True
-
-        if not validated_data.get('titolo'):
-            validated_data['titolo'] = file.name
-
-        return super().create(validated_data)

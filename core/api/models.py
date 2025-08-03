@@ -1,5 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
+from .validation import pdf_validation
 
 class UserProfileManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -78,10 +80,10 @@ class Evento(models.Model):
     artista = models.CharField(max_length=255)
     data_ora = models.DateTimeField()
     luogo = models.CharField(max_length=255)
-    città = models.CharField(max_length=100)
+    citta = models.CharField(max_length=100)
     url_immagine = models.URLField(blank=True)
     categoria = models.CharField(max_length=50, choices=CATEGORIE)
-    stato_disponibilità = models.CharField(max_length=20, choices=STATO_DISPONIBILITA, default='disponibile')
+    stato_disponibilita = models.CharField(max_length=20, choices=STATO_DISPONIBILITA, default='disponibile')
     attivo = models.BooleanField(default=True)
     timestamp_aggiornamento = models.DateTimeField(auto_now=True)
 
@@ -126,7 +128,6 @@ class EventoPiattaforma(models.Model):
 
 
 # modello biglietto
-
 class Biglietto(models.Model):
 
     tipo_biglietto = models.CharField(max_length=5)
@@ -136,7 +137,14 @@ class Biglietto(models.Model):
     path_file = models.FileField(upload_to='uploads/%Y/%m/%d/%H')
 
     def save(self,*args,**kwargs):
-        if not self.titolo :
-            self.titolo = self.path_file.name
+        try:
+            if not self.titolo :
+                self.titolo = self.path_file.name
 
-        super().save(*args,**kwargs)
+            pdf_validation(self.path_file)
+            self.is_valid=False
+
+            super().save(*args,**kwargs)
+
+        except OSError as e:
+            raise ValidationError(f'Errore nel model: {str(e)}')
