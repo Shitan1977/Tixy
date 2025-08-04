@@ -156,3 +156,20 @@ SWAGGER_SETTINGS = {
     },
 }
 
+#cofigurazione email
+#EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+
+#EMAIL_HOST = 'smtp.aruba.it'
+#EMAIL_PORT = 587
+#EMAIL_USE_TLS = True
+
+#EMAIL_HOST_USER = 'info@acecrm.it'
+#EMAIL_HOST_PASSWORD = '!Demetrio77'
+#DEFAULT_FROM_EMAIL = 'info@acecrm.it'  # stesso dell'user
+
+# Configurazione email locale – stampa in console
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = 'info@acecrm.it'
+
+
+

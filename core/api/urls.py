@@ -4,7 +4,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import (TokenObtainPairView,TokenRefreshView)
 from rest_framework.routers import DefaultRouter
-from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView
+from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView
 
 
 # Rotta di test
@@ -37,4 +37,6 @@ urlpatterns = [
     #registrazione utenti api pubblica
     path('register/', UserRegistrationView.as_view(), name='user-register'),
 
+    #otp
+    path('auth/confirm-otp/', ConfirmOTPView.as_view(), name='confirm-otp'),
 ]

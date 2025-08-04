@@ -1,3 +1,5 @@
+from datetime import timedelta
+from django.utils import timezone
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.core.exceptions import ValidationError
@@ -21,6 +23,8 @@ class UserProfileManager(BaseUserManager):
 class UserProfile(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True)
     first_name = models.CharField(max_length=100)
+    otp_code = models.CharField(max_length=6, blank=True, null=True)
+    otp_created_at = models.DateTimeField(blank=True, null=True)
     last_name = models.CharField(max_length=100)
     phone_number = models.CharField(max_length=20, blank=True, null=True)
     date_of_birth = models.DateField(blank=True, null=True)
@@ -57,6 +61,21 @@ class UserProfile(AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['first_name', 'last_name']
 
+    def generate_otp(self):
+        import random
+        self.otp_code = str(random.randint(100000, 999999))
+        self.otp_created_at = timezone.now()
+        self.save()
+        return self.otp_code
+
+    def is_otp_valid(self, code):
+        if self.otp_code != code:
+            return False
+        if not self.otp_created_at:
+            return False
+        if timezone.now() > self.otp_created_at + timedelta(minutes=10):
+            return False
+        return True
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.email})"
 

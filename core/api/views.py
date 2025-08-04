@@ -1,3 +1,4 @@
+from drf_yasg.utils import swagger_auto_schema
 from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -6,7 +7,8 @@ from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import Evento, Biglietto
-from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer
+from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
+from rest_framework.views import APIView
 
 User = get_user_model()
 
@@ -69,7 +71,19 @@ class EventoViewSet(viewsets.ModelViewSet):
         if a_data:
             qs = qs.filter(data_ora__lte=a_data)
         return qs
+#otp via email
+class ConfirmOTPView(APIView):
 
+    @swagger_auto_schema(
+        request_body=OTPVerificationSerializer,
+        operation_summary="Conferma registrazione OTP",
+        operation_description="Inserisci email e codice OTP ricevuto via email per completare la registrazione."
+    )
+    def post(self, request):
+        serializer = OTPVerificationSerializer(data=request.data)
+        if serializer.is_valid():
+            return Response(serializer.validated_data, status=200)
+        return Response(serializer.errors, status=400)
 
 # Parte dell'upload dei File
 class BigliettoUploadView(viewsets.ModelViewSet):
