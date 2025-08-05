@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import Evento, Biglietto
-from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
+from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer, OTPRegenerationSerializer
 from rest_framework.views import APIView
 
 User = get_user_model()
@@ -52,14 +52,14 @@ class EventoViewSet(viewsets.ModelViewSet):
     queryset = Evento.objects.all()
     serializer_class = EventoSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
-    search_fields = ['nome_evento', 'artista', 'città', 'luogo']
+    search_fields = ['nome_evento', 'artista', 'citta', 'luogo']
     ordering_fields = ['data_ora']
-    filterset_fields = ['città', 'categoria', 'artista', 'stato_disponibilità']
+    filterset_fields = ['citta', 'categoria', 'artista', 'stato_disponibilita']
 
     def get_permissions(self):
         if self.request.method in ['GET', 'HEAD', 'OPTIONS']:
-            return [permissions.AllowAny]
-        return [IsAdminOrIsSelf]
+            return [permissions.AllowAny()]
+        return [IsAdminOrIsSelf()]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -73,6 +73,7 @@ class EventoViewSet(viewsets.ModelViewSet):
         return qs
 #otp via email
 class ConfirmOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
 
     @swagger_auto_schema(
         request_body=OTPVerificationSerializer,
@@ -85,11 +86,26 @@ class ConfirmOTPView(APIView):
             return Response(serializer.validated_data, status=200)
         return Response(serializer.errors, status=400)
 
+# Rigenera OTP
+class RegenerateOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    @swagger_auto_schema(
+        request_body=OTPRegenerationSerializer,
+        operation_summary="Rigenera codice OTP",
+        operation_description="Invia un nuovo codice OTP all'email specificata per completare la registrazione."
+    )
+    def post(self, request):
+        serializer = OTPRegenerationSerializer(data=request.data)
+        if serializer.is_valid():
+            return Response(serializer.validated_data, status=200)
+        return Response(serializer.errors, status=400)
+
 # Parte dell'upload dei File
 class BigliettoUploadView(viewsets.ModelViewSet):
     queryset = Biglietto.objects.all()
     serializer_class = BigliettoUploadSerializer
-    #permission_classes = [IsAdminOrIsSelf]
+    permission_classes = [IsAdminOrIsSelf]
     parser_classes = [MultiPartParser, FormParser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['titolo','data_caricamento']

@@ -111,6 +111,26 @@ class OTPVerificationSerializer(serializers.Serializer):
 
         return {"detail": "Registrazione confermata con successo."}
 
+# 🔹 Serializer per rigenerare OTP
+class OTPRegenerationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate(self, attrs):
+        try:
+            user = User.objects.get(email=attrs['email'])
+        except User.DoesNotExist:
+            raise serializers.ValidationError("Utente non trovato.")
+
+        # Verifica che l'utente non sia già attivo
+        if user.is_active:
+            raise serializers.ValidationError("Utente già registrato e attivo.")
+
+        # Rigenera OTP e invia email
+        user.generate_otp()
+        invia_otp_email(user)
+
+        return {"detail": "Nuovo codice OTP inviato via email."}
+
 # 🔹 Serializer piattaforme (es. TicketOne)
 class PiattaformaSerializer(serializers.ModelSerializer):
     class Meta:
