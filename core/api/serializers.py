@@ -166,3 +166,12 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
             'is_valid'
         ]
         read_only_fields = ['id', 'data_caricamento', 'is_valid']
+        extra_kwargs = {
+            'path_file': {'required': False, 'allow_null': False}
+        }
+
+#Impedisce che il path_file viene cancellato con PUT
+    def update(self, instance, validated_data):
+        if 'path_file' not in validated_data:
+            validated_data['path_file'] = instance.path_file
+        return super().update(instance, validated_data)

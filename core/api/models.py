@@ -155,14 +155,10 @@ class Biglietto(models.Model):
     path_file = models.FileField(upload_to='uploads/%Y/%m/%d/%H')
 
     def save(self,*args,**kwargs):
-        try:
-            if not self.nome :
-                self.nome = self.path_file.name
+        if not self.nome :
+            self.nome = self.path_file.name
 
-            pdf_validation(self.path_file)
-            self.is_valid=False
+        pdf_validation(self.path_file)
+        self.is_valid=False
 
-            super().save(*args,**kwargs)
-
-        except OSError as e:
-            raise ValidationError(f'Errore nel model: {str(e)}')
+        super().save(*args,**kwargs)
