@@ -149,16 +149,15 @@ class EventoPiattaforma(models.Model):
 # modello biglietto
 class Biglietto(models.Model):
 
-    tipo_biglietto = models.CharField(max_length=5)
-    titolo = models.CharField(max_length=255,blank=True)
+    nome = models.CharField(max_length=255,blank=True)
     data_caricamento = models.DateTimeField(auto_now_add=True)
     is_valid = models.BooleanField(default=False)
     path_file = models.FileField(upload_to='uploads/%Y/%m/%d/%H')
 
     def save(self,*args,**kwargs):
         try:
-            if not self.titolo :
-                self.titolo = self.path_file.name
+            if not self.nome :
+                self.nome = self.path_file.name
 
             pdf_validation(self.path_file)
             self.is_valid=False
