@@ -160,10 +160,9 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
         model = Biglietto
         fields = [
             'id',
-            'tipo_biglietto',
-            'titolo',
+            'nome',
             'path_file',
             'data_caricamento',
             'is_valid'
         ]
-        read_only_fields = ['id', 'data_caricamento', 'is_valid', 'tipo_biglietto']
+        read_only_fields = ['id', 'data_caricamento', 'is_valid']

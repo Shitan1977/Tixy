@@ -92,6 +92,6 @@ class BigliettoUploadView(viewsets.ModelViewSet):
     #permission_classes = [IsAdminOrIsSelf]
     parser_classes = [MultiPartParser, FormParser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['titolo','data_caricamento']
+    search_fields = ['nome','data_caricamento']
     ordering_fields = ['data_caricamento']
-    filterset_fields = ['tipo_biglietto','titolo']
+    filterset_fields = ['nome','data_caricamento']
