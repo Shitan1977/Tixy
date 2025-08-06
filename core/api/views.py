@@ -52,9 +52,9 @@ class EventoViewSet(viewsets.ModelViewSet):
     queryset = Evento.objects.all()
     serializer_class = EventoSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
-    search_fields = ['nome_evento', 'artista', 'città', 'luogo']
+    search_fields = ['nome_evento', 'artista', 'citta', 'luogo']
     ordering_fields = ['data_ora']
-    filterset_fields = ['città', 'categoria', 'artista', 'stato_disponibilità']
+    filterset_fields = ['citta', 'categoria', 'artista', 'stato_disponibilita']
 
     def get_permissions(self):
         if self.request.method in ['GET', 'HEAD', 'OPTIONS']:

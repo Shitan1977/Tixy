@@ -2,7 +2,6 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone as tz
 from datetime import datetime, timezone
 import pikepdf
-
 import re
 
 def date_check (created,modificated,label):
@@ -24,7 +23,7 @@ def date_check (created,modificated,label):
             raise ValidationError(f'{label} - la Data di Modifica precede la Data di Creazione')
 
     except OSError as e:
-        raise ValidationError(f'Errone nel date_check: {str(e)}')
+        raise ValidationError(f'Error validation.date_check: {str(e)}')
 
 def parse_pdf_date(date_str):
     try:
@@ -35,10 +34,10 @@ def parse_pdf_date(date_str):
         m = re.match(r"D:(\d{14})", date_str)
         if not m:
             return None
-
         return datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+
     except (ValueError, TypeError, OSError) as e:
-        raise ValidationError(f'Errore nel parse: {str(e)}')
+        raise ValidationError(f'Error validation.parse_pdf_date: {str(e)}')
 
 def pdf_validation(file):
     try:
@@ -54,4 +53,4 @@ def pdf_validation(file):
             date_check(created,modificated,'PDF')
 
     except (pikepdf.PdfError, OSError) as e:
-        raise ValidationError(f'Errore durante la lettura del PDF: {str(e)}')
+        raise ValidationError(f'Error validation.pdf_validation: {str(e)}')

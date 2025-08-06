@@ -127,7 +127,7 @@ class EventoPiattaformaSerializer(serializers.ModelSerializer):
             'id',
             'piattaforma',
             'url_pagina_evento',
-            'disponibilità_biglietti',
+            'disponibilita_biglietti',
             'prezzo_minimo',
             'timestamp_aggiornamento'
         ]

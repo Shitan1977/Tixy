@@ -135,7 +135,7 @@ class EventoPiattaforma(models.Model):
     evento = models.ForeignKey('Evento', on_delete=models.CASCADE, related_name='piattaforme_collegate')
     piattaforma = models.ForeignKey('Piattaforma', on_delete=models.CASCADE, related_name='eventi_collegati')
     url_pagina_evento = models.URLField()
-    disponibilità_biglietti = models.CharField(max_length=20, choices=STATO_BIGLIETTI, default='disponibile')
+    disponibilita_biglietti = models.CharField(max_length=20, choices=STATO_BIGLIETTI, default='disponibile')
     prezzo_minimo = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
     timestamp_aggiornamento = models.DateTimeField(auto_now=True)
 
