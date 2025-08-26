@@ -1,3 +1,4 @@
+from django.template.context_processors import request
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Evento, Piattaforma, EventoPiattaforma, Biglietto
@@ -175,3 +176,10 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
         if 'path_file' not in validated_data:
             validated_data['path_file'] = instance.path_file
         return super().update(instance, validated_data)
+
+# Funzione per la visualizzazione dei biglietti tramite api
+    def get_file_url(self,obj):
+        req = self.context.get('request')
+        if obj.path_file and req:
+            return req.build_absolute_url(obj.path_file.url)
+        return None

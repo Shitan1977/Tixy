@@ -147,12 +147,14 @@ class EventoPiattaforma(models.Model):
 
 
 # modello biglietto
-class Biglietto(models.Model):
+def biglietto_path(filename):
+    return f'uploads/{filename}'
 
+class Biglietto(models.Model):
     nome = models.CharField(max_length=255,blank=True)
     data_caricamento = models.DateTimeField(auto_now_add=True)
     is_valid = models.BooleanField(default=False)
-    path_file = models.FileField(upload_to='uploads/%Y/%m/%d/%H')
+    path_file = models.FileField(upload_to=biglietto_path)
 
     def save(self,*args,**kwargs):
         if not self.nome :
