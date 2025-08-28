@@ -1,3 +1,4 @@
+from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
@@ -95,3 +96,7 @@ class BigliettoUploadView(viewsets.ModelViewSet):
     search_fields = ['nome','data_caricamento']
     ordering_fields = ['data_caricamento']
     filterset_fields = ['nome','data_caricamento']
+
+#    @swagger_auto_schema(security=[{'Bearer':[]}])
+#    def create(self, request, *args, **kwargs):
+#        return super().create(request,*args, **kwargs)

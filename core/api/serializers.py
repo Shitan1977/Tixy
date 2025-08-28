@@ -171,15 +171,18 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
             'path_file': {'required': False, 'allow_null': False}
         }
 
-#Impedisce che il path_file viene cancellato con PUT
+#    def create(self, validated_data):
+#        validated_data['user'] = self.context['request'].user.userprofile
+#        return super().create(validated_data)
+
     def update(self, instance, validated_data):
         if 'path_file' not in validated_data:
             validated_data['path_file'] = instance.path_file
         return super().update(instance, validated_data)
 
-# Funzione per la visualizzazione dei biglietti tramite api
-    def get_file_url(self,obj):
-        req = self.context.get('request')
-        if obj.path_file and req:
-            return req.build_absolute_url(obj.path_file.url)
-        return None
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        request= self.context.get('request')
+        if instance.path_file and request:
+            rep['path_file'] = request.build_absolute_uri(instance.path_file.url)
+        return rep

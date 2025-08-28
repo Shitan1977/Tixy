@@ -2,8 +2,9 @@ from datetime import timedelta
 from django.utils import timezone
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
-from django.core.exceptions import ValidationError
 from .validation import pdf_validation
+import os
+import re
 
 class UserProfileManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -147,20 +148,20 @@ class EventoPiattaforma(models.Model):
 
 
 # modello biglietto
-def biglietto_path(filename):
+def biglietto_path(instance,filename):
     return f'uploads/{filename}'
 
 class Biglietto(models.Model):
-    nome = models.CharField(max_length=255,blank=True)
+    nome = models.CharField(max_length=255,blank=True,null=True)
     data_caricamento = models.DateTimeField(auto_now_add=True)
     is_valid = models.BooleanField(default=False)
     path_file = models.FileField(upload_to=biglietto_path)
 
     def save(self,*args,**kwargs):
-        if not self.nome :
-            self.nome = self.path_file.name
-
+        if not self.nome and self.path_file:
+            raw_name = os.path.basename(self.path_file.name)
+            safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', raw_name)
+            self.nome = safe_name
         pdf_validation(self.path_file)
         self.is_valid=False
-
         super().save(*args,**kwargs)

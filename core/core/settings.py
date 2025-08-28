@@ -43,7 +43,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_yasg',
     'api',
-    'django_cleanup.apps.CleanupConfig', # IMPORTANTE deve essere sempre alla fine dell' elenco
+    #'django_cleanup.apps.CleanupConfig', # IMPORTANTE deve essere sempre alla fine dell' elenco
 ]
 AUTH_USER_MODEL = 'api.UserProfile'
 
