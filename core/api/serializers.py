@@ -171,10 +171,6 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
             'path_file': {'required': False, 'allow_null': False}
         }
 
-#    def create(self, validated_data):
-#        validated_data['user'] = self.context['request'].user.userprofile
-#        return super().create(validated_data)
-
     def update(self, instance, validated_data):
         if 'path_file' not in validated_data:
             validated_data['path_file'] = instance.path_file

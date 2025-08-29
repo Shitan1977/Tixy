@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from django.utils import timezone
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
@@ -149,7 +149,7 @@ class EventoPiattaforma(models.Model):
 
 # modello biglietto
 def biglietto_path(instance,filename):
-    return f'uploads/{filename}'
+    return f"uploads/{datetime.now().strftime('%Y/%m')}/{filename}"
 
 class Biglietto(models.Model):
     nome = models.CharField(max_length=255,blank=True,null=True)
