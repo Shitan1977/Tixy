@@ -97,6 +97,3 @@ class BigliettoUploadView(viewsets.ModelViewSet):
     ordering_fields = ['data_caricamento']
     filterset_fields = ['nome','data_caricamento']
 
-#    @swagger_auto_schema(security=[{'Bearer':[]}])
-#    def create(self, request, *args, **kwargs):
-#        return super().create(request,*args, **kwargs)

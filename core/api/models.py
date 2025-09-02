@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
-from .validation import pdf_validation
+from .validation import file_validation
 import os
 import re
 
@@ -152,16 +152,19 @@ def biglietto_path(instance,filename):
     return f"uploads/{datetime.now().strftime('%Y/%m')}/{filename}"
 
 class Biglietto(models.Model):
-    nome = models.CharField(max_length=255,blank=True,null=True)
-    data_caricamento = models.DateTimeField(auto_now_add=True)
-    is_valid = models.BooleanField(default=False)
+    nome_file = models.CharField(max_length=255,blank=True,null=True)
+    nome_intestatario = models.CharField(max_length=255,blank=True,null=True)
+    sigillo_fiscale = models.CharField(max_length=255,blank=True, null=True)
     path_file = models.FileField(upload_to=biglietto_path)
+    is_valid = models.BooleanField(default=False)
+    data_caricamento = models.DateTimeField(auto_now_add=True)
 
     def save(self,*args,**kwargs):
-        if not self.nome and self.path_file:
+        if not self.nome_file and self.path_file:
             raw_name = os.path.basename(self.path_file.name)
             safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', raw_name)
-            self.nome = safe_name
-        pdf_validation(self.path_file)
+            self.nome_file = safe_name
+        file_validation(self.path_file)
+        self.sigillo_fiscale = file_validation(self.path_file)
         self.is_valid=False
         super().save(*args,**kwargs)

@@ -3,6 +3,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Evento, Piattaforma, EventoPiattaforma, Biglietto
 from .utils import invia_otp_email
+import os
 User = get_user_model()
 
 # 🔹 Serializer per il profilo utente (visibile da admin o API backend)
@@ -157,19 +158,34 @@ class EventoSerializer(serializers.ModelSerializer):
 
 # 🔹 Serializer caricamento biglietto (PDF)
 class BigliettoUploadSerializer(serializers.ModelSerializer):
+    path_file = serializers.FileField(max_length=None, allow_empty_file=False)
+
     class Meta:
         model = Biglietto
         fields = [
             'id',
-            'nome',
+            'nome_file',
+            'nome_intestatario',
+            'sigillo_fiscale',
             'path_file',
-            'data_caricamento',
-            'is_valid'
+            'is_valid',
+            'data_caricamento'
         ]
         read_only_fields = ['id', 'data_caricamento', 'is_valid']
         extra_kwargs = {
             'path_file': {'required': False, 'allow_null': False}
         }
+
+    def validate_path_file(self,file):
+        max_size = 2 * 1024 * 1024 #max 2 MB
+        if file.size > max_size:
+            raise serializers.ValidationError("File troppo grande (max 2 MB)")
+
+        ext = os.path.splitext(file.name)[1].lower()
+        if ext != '.pdf':
+            raise serializers.ValidationError("Il file deve essere un PDF")
+
+        return file
 
     def update(self, instance, validated_data):
         if 'path_file' not in validated_data:
