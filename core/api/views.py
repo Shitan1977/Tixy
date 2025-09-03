@@ -9,6 +9,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from .models import Evento, Biglietto
 from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
+from .serializers import UserProfileSerializer
 
 User = get_user_model()
 
@@ -95,3 +97,10 @@ class BigliettoUploadView(viewsets.ModelViewSet):
     search_fields = ['nome','data_caricamento']
     ordering_fields = ['data_caricamento']
     filterset_fields = ['nome','data_caricamento']
+
+class UserProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
+        return Response(serializer.data)
