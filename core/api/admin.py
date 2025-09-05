@@ -3,10 +3,12 @@ from .models import *
 
 @admin.register(Biglietto)
 class BigliettoAdmin(admin.ModelAdmin):
-    list_display = ['nome_file',
+    list_display = [
+            'nome_file',
             'nome_intestatario',
             'sigillo_fiscale',
             'path_file',
+            'hash_file',
             'is_valid',
             'data_caricamento']
 @admin.register(Evento)

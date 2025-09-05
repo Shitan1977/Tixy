@@ -1,3 +1,4 @@
+import hashlib
 import os.path
 from django.core.exceptions import ValidationError
 from datetime import datetime
@@ -10,21 +11,32 @@ def file_validation(file):
     path_temporaneo = None
     try:
        with tempfile.NamedTemporaryFile(delete=False,suffix=".pdf") as file_temporaneo:
-           for chunk in file.chunks():
-               file_temporaneo.write(chunk)
+           if hasattr(file, "chunks"):
+                for chunk in file.chunks():
+                   file_temporaneo.write(chunk)
+           else:
+               file_temporaneo.write(file.read())
            file_temporaneo.flush()
            path_temporaneo = file_temporaneo.name
 
+       hash_file = genera_hash(path_temporaneo)
        check_meta(path_temporaneo)
-       sigillo = leggi_file(path_temporaneo)
+       sigilli = trova_sigilli(path_temporaneo)
 
-       return sigillo
+       return sigilli, hash_file
 
     except (OSError, ValidationError) as e:
         raise ValidationError(f'Errore durante validazione: {str(e)}')
     finally:
         if path_temporaneo and os.path.exists(path_temporaneo):
             os.remove(path_temporaneo)
+
+def genera_hash(file):
+    h = hashlib.sha256()
+    with open(file, 'rb') as file:
+        for chunk in iter(lambda : file.read(8192), b""):
+            h.update(chunk)
+        return h.hexdigest()
 
 def check_meta(file):
     try:
@@ -41,52 +53,21 @@ def check_meta(file):
     except pikepdf.PdfError as e:
         raise ValidationError(f'Errore nel controllo dei metadati: {str(e)}')
 
-def leggi_file(path_temporaneo):
+def trova_sigilli(path_temporaneo):
     try:
-        with open(path_temporaneo, 'rb') as text:
-            testo = extract_text(text)
+        with open(path_temporaneo, 'rb') as t:
+            testo = extract_text(t)
         print(repr(testo))
-        biglietti = []
 
         # --- REGEX TICKETONE ---
-        # Esempio: "Sigillo Fiscale: 2e19b61b7dd31a59 ... posto7CampoMartinaPrezzo"
-        pattern_ticketone = re.compile(
-            r"Sigillo Fiscale:\s*([0-9a-f]+).*?posto\d+([A-Za-zÀ-ÖØ-öø-ÿ\s]+?)\s*Prezzo",
-            flags=re.DOTALL
-        )
+        pattern_ticketone = re.compile(r"Sigillo Fiscale:\s*([0-9a-f]+)")
+        sigilli = pattern_ticketone.findall(testo)
 
-        # --- REGEX TICKETMASTER ---
-        # Esempio: "SF: cfb4873ec4c90c5d\nStefano Barrancotto\nPI Org.: ..."
-        pattern_ticketmaster = re.compile(
-            r"(?:SF|S\.F\.?|Sigillo Fiscale)[:\s]*([0-9a-f]+).*?(?:\n|\r)([A-Z][A-Za-zÀ-ÖØ-öø-ÿ\s']+?)\s*(?:PI|Progressivo|Emissione|Prezzo)",
-            flags=re.DOTALL
-        )
+        # --- RIMUOVE DUPLICATI e MANTIENE L'ORDINE DI ESTRAZIONE
+        sigilli_unici = list(dict.fromkeys(sigilli))
 
-        # --- CERCA IN TUTTI I FORMATI ---
-        for sigillo, nome in pattern_ticketone.findall(testo):
-            nome_pulito = re.sub(r"\s+", " ", nome).strip().title()
-            biglietti.append({
-                "sigillo": sigillo.strip(),
-                "intestatario": nome_pulito
-            })
-
-        for sigillo, nome in pattern_ticketmaster.findall(testo):
-            nome_pulito = re.sub(r"\s+", " ", nome).strip().title()
-            biglietti.append({
-                "sigillo": sigillo.strip(),
-                "intestatario": nome_pulito
-            })
-
-        # --- RIMUOVI DUPLICATI (se stesso sigillo compare più volte)
-        unici = {}
-        for b in biglietti:
-            unici[b["sigillo"]] = b  # sovrascrive eventuali duplicati
-        biglietti = list(unici.values())
-
-        print(biglietti)
-
-        return sigillo.strip()
-
+        print(sigilli_unici)
+        return sigilli_unici
 
     except Exception as e:
         raise ValidationError(f'Errore nella lettura del test: {str(e)}')

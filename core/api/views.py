@@ -1,15 +1,20 @@
-from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
+from django.utils.text import get_valid_filename
 from django_filters.rest_framework import DjangoFilterBackend
+from django.core.files.storage import default_storage
+from django.db import transaction
+from uuid import uuid4
+from datetime import datetime
 from .models import Evento, Biglietto
 from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
-from rest_framework.views import APIView
+from .validation import file_validation
 
 User = get_user_model()
 
@@ -90,10 +95,79 @@ class ConfirmOTPView(APIView):
 class BigliettoUploadView(viewsets.ModelViewSet):
     queryset = Biglietto.objects.all()
     serializer_class = BigliettoUploadSerializer
-    #permission_classes = [IsAdminOrIsSelf]
     parser_classes = [MultiPartParser, FormParser]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['nome','data_caricamento']
     ordering_fields = ['data_caricamento']
     filterset_fields = ['nome','data_caricamento']
 
+    def salvataggio_temporaneo(self, file_caricato):
+        temp_dir = "temp_uploads/"
+        nome_base = get_valid_filename(file_caricato.name)
+        nome_temp = f"{temp_dir}{uuid4().hex}_{nome_base}"
+        default_storage.save(nome_temp, file_caricato)
+        return nome_temp
+
+    def path_finale(self, file_originale):
+        nome = get_valid_filename(file_originale)
+        nome_finale = f"uploads/{datetime.now().strftime('%Y/%m')}/{nome}"
+        nome_finale = default_storage.get_available_name(nome_finale)
+        return nome_finale
+
+    def create(self, request, *args, **kwargs):
+        upload = request.FILES.get('path_file')
+        if not upload:
+            return Response({'error':'Nessun file caricato'}, status=status.HTTP_400_BAD_REQUEST)
+
+        nome_temp = None
+        try:
+            nome_temp = self.salvataggio_temporaneo(upload)
+            with default_storage.open(nome_temp, 'rb') as file:
+                sigilli, hash_file = file_validation(file)
+            if not sigilli:
+                default_storage.delete(nome_temp)
+                return Response({'error':'Nessun dato trovato'}, status=status.HTTP_400_BAD_REQUEST)
+            if Biglietto.objects.filter(hash_file=hash_file).exists():
+                default_storage.delete(nome_temp)
+                return Response({'error': 'File duplicato'}, status=status.HTTP_400_BAD_REQUEST)
+
+            nome_finale = self.path_finale(upload.name)
+
+            biglietti = []
+
+            with transaction.atomic():
+                primo_b = Biglietto.objects.create(
+                    path_file=nome_finale,
+                    nome_file=upload.name,
+                    sigillo_fiscale=sigilli[0],
+                    hash_file=hash_file,
+                    is_valid=False
+                )
+                biglietti.append(primo_b)
+
+                for sigillo in sigilli[1:]:
+                    b = Biglietto.objects.create(
+                        path_file=nome_finale,
+                        nome_file=upload.name,
+                        sigillo_fiscale=sigillo,
+                        hash_file=hash_file,
+                        is_valid=False
+                    )
+                    biglietti.append(b)
+
+                def fine_processo():
+                    try:
+                        with default_storage.open(nome_temp, 'rb') as temp_file:
+                            default_storage.save(nome_finale,temp_file)
+                    finally:
+                        if default_storage.exists(nome_temp):
+                            default_storage.delete(nome_temp)
+
+                transaction.on_commit(fine_processo)
+
+            serializer = self.get_serializer(biglietti, many=True, context={'request':request})
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            if nome_temp and default_storage.exists(nome_temp):
+                default_storage.delete(nome_temp)
+            return  Response({'error':str(e)}, status=status.HTTP_400_BAD_REQUEST)

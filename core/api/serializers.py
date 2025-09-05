@@ -168,6 +168,7 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
             'nome_intestatario',
             'sigillo_fiscale',
             'path_file',
+            'hash_file',
             'is_valid',
             'data_caricamento'
         ]
