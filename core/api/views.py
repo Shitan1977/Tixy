@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.permissions import IsAuthenticated
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django.utils.text import get_valid_filename
@@ -18,6 +19,7 @@ from .validation import file_validation
 
 User = get_user_model()
 
+# --- USER ---
 class IsAdminOrIsSelf(permissions.BasePermission):
     """
     Consente l'accesso all'admin o all'utente stesso.
@@ -48,12 +50,20 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         user.save()
         return Response({"status": "Account disattivato"}, status=status.HTTP_204_NO_CONTENT)
 
-#registrazione pubblica
+class UserProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
+        return Response(serializer.data)
+
+# --- REGISTRAZIONE PUBBLICA ---
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
     permission_classes = [permissions.AllowAny]
 
+# --- EVENTO ---
 class EventoViewSet(viewsets.ModelViewSet):
     queryset = Evento.objects.all()
     serializer_class = EventoSerializer
@@ -77,7 +87,8 @@ class EventoViewSet(viewsets.ModelViewSet):
         if a_data:
             qs = qs.filter(data_ora__lte=a_data)
         return qs
-#otp via email
+
+# --- OTP EMAIL ---
 class ConfirmOTPView(APIView):
 
     @swagger_auto_schema(
@@ -91,7 +102,7 @@ class ConfirmOTPView(APIView):
             return Response(serializer.validated_data, status=200)
         return Response(serializer.errors, status=400)
 
-# Parte dell'upload dei File
+# --- UPLOAD BIGLIETTI ---
 class BigliettoUploadView(viewsets.ModelViewSet):
     queryset = Biglietto.objects.all()
     serializer_class = BigliettoUploadSerializer

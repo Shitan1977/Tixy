@@ -4,8 +4,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import (TokenObtainPairView,TokenRefreshView)
 from rest_framework.routers import DefaultRouter
-from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView
-
+from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView, UserProfileAPIView
 
 # Rotta di test
 @api_view(['GET'])
@@ -15,11 +14,8 @@ def hello_world(request):
 
 # Router per UserProfile
 router = DefaultRouter()
-
 router.register(r'users', UserProfileViewSet, basename='user')
-
 router.register(r'eventi', EventoViewSet, basename='evento')
-
 router.register(r'biglietti',BigliettoUploadView, basename='biglietti')
 
 urlpatterns = [
@@ -33,6 +29,7 @@ urlpatterns = [
 
     # API UserProfile
     path('', include(router.urls)),
+    path('profile/', UserProfileAPIView.as_view(), name='user-profile'),
 
     #registrazione utenti api pubblica
     path('register/', UserRegistrationView.as_view(), name='user-register'),
