@@ -1,7 +1,7 @@
 from django.template.context_processors import request
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Evento, Piattaforma, EventoPiattaforma, Biglietto
+from .models import *
 from .utils import invia_otp_email
 import os
 User = get_user_model()
@@ -113,11 +113,35 @@ class OTPVerificationSerializer(serializers.Serializer):
 
         return {"detail": "Registrazione confermata con successo."}
 
-# 🔹 Serializer piattaforme (es. TicketOne)
+# 🔹 Serializer Recensione
+class RecensioneSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Recensione
+        fields = '__all__'
+
+# 🔹 Serializer Artista
+class ArtistaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Artista
+        fields = '__all__'
+
+# 🔹 Serializer Luoghi
+class LuoghiSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Luoghi
+        fields = '__all__'
+
+# 🔹 Serializer Categoria
+class CategoriaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Categoria
+        fields = '__all__'
+
+# 🔹 Serializer Piattaforme (es. TicketOne)
 class PiattaformaSerializer(serializers.ModelSerializer):
     class Meta:
         model = Piattaforma
-        fields = ['id', 'nome', 'url_base']
+        fields = '__all__'
 
 # 🔹 Serializer relazioni evento-piattaforma
 class EventoPiattaformaSerializer(serializers.ModelSerializer):
@@ -125,14 +149,7 @@ class EventoPiattaformaSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = EventoPiattaforma
-        fields = [
-            'id',
-            'piattaforma',
-            'url_pagina_evento',
-            'disponibilita_biglietti',
-            'prezzo_minimo',
-            'timestamp_aggiornamento'
-        ]
+        fields = '__all__'
 
 # 🔹 Serializer evento
 class EventoSerializer(serializers.ModelSerializer):
@@ -140,39 +157,39 @@ class EventoSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Evento
-        fields = [
-            'id',
-            'nome_evento',
-            'descrizione',
-            'artista',
-            'data_ora',
-            'luogo',
-            'citta',
-            'url_immagine',
-            'categoria',
-            'stato_disponibilita',
-            'attivo',
-            'timestamp_aggiornamento',
-            'piattaforme_collegate',
-        ]
+        fields = '__all__'
 
-# 🔹 Serializer caricamento biglietto (PDF)
+# 🔹 Serializer Sconti
+class ScontiSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Sconti
+        fields = '__all__'
+
+# 🔹 Serializer Abbonamento
+class AbbonamentoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Abbonamento
+        fields = '__all__'
+
+# 🔹 Serializer Monitoraggio
+class MonitoraggioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Monitoraggio
+        fields = '__all__'
+
+# 🔹 Serializer Notifica
+class NotificaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Notifica
+        fields = '__all__'
+
+# 🔹 Serializer Biglietto
 class BigliettoUploadSerializer(serializers.ModelSerializer):
     path_file = serializers.FileField(max_length=None, allow_empty_file=False)
 
     class Meta:
         model = Biglietto
-        fields = [
-            'id',
-            'nome_file',
-            'nome_intestatario',
-            'sigillo_fiscale',
-            'path_file',
-            'hash_file',
-            'is_valid',
-            'data_caricamento'
-        ]
-        read_only_fields = ['id', 'data_caricamento', 'is_valid']
+        fields = '__all__'
         extra_kwargs = {
             'path_file': {'required': False, 'allow_null': False}
         }
@@ -199,3 +216,15 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
         if instance.path_file and request:
             rep['path_file'] = request.build_absolute_uri(instance.path_file.url)
         return rep
+
+# 🔹 Serializer Rivendita
+class RivenditaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Rivendita
+        fields = '__all__'
+
+# 🔹 Serializer Acquisto
+class AcquistoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Acquisto
+        fields = '__all__'

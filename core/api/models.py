@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 from random import choices
-
 from django.db.transaction import mark_for_rollback_on_error
 from django.template.defaultfilters import default
 from django.utils import timezone
@@ -88,24 +87,30 @@ class Recensione(models.Model):
     venditore = models.ForeignKey(UserProfile,
                                      on_delete=models.CASCADE,
                                      blank=True, null=True,
-                                     related_name='venditore')
+                                     related_name='venditore_recensione')
     acquirente = models.ForeignKey(UserProfile,
                                       on_delete=models.SET_NULL,
                                       blank=True, null=True,
-                                      related_name='acquirente')
+                                      related_name='acquirente_recensione')
+
+    def __str__(self):
+        return f"Da: {self.acquirente} - Per: {self.venditore}"
 
 class Artista(models.Model):
     nome = models.CharField(max_length=255,blank=True, null=True)
     nome_normalizzato = models.CharField(max_length=255,blank=True, null=True,unique=True)
     tipo = models.CharField(max_length=7, choices=[
                                 ('artista','Artista'),
-                                ('squadra','Squadra'),
+                                ('squadra','Squadra Sportiva'),
                                 ('atleta','Atleta'),
                                 ('altro','Altro')
                             ], default='artista')
     nomi_alternativi = models.JSONField(blank=True, null=True)
     creato_il = models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return {self.nome}
 
 class Luoghi(models.Model):
     nome = models.CharField(max_length=255, default='')
@@ -117,9 +122,15 @@ class Luoghi(models.Model):
     creato_il= models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
 
+    def __str__(self):
+        return {self.nome}
+
 class Categoria(models.Model):
     slug = models.CharField(max_length=60,default='',unique=True)
     nome = models.CharField(max_length=120,default='')
+
+    def __str__(self):
+        return self.nome
 
 class Evento(models.Model):
     STATO = [
@@ -143,36 +154,36 @@ class Evento(models.Model):
     data_inizio_utc = models.DateTimeField()
     data_fine_utc = models.DateTimeField(blank=True, null=True)
     apertura_porte = models.DateTimeField(blank=True, null=True)
-    stato = models.CharField(max_length=50, choices=STATO,default='pianificato')
+    stato = models.CharField(max_length=13, choices=STATO,default='pianificato')
     genere = models.CharField(max_length=120,blank=True, null=True)
     lingua = models.CharField(max_length=40,blank=True, null=True)
-    immagine_url = models.CharField(max_length=516,blank=True, null=True)
+    immagine_url = models.CharField(max_length=512,blank=True, null=True)
     luogo = models.ForeignKey(Luoghi,
-                                 on_delete=models.SET_NULL,
-                                 blank=True, null=True,
-                                 related_name='luogo_evento')
+                              on_delete=models.CASCADE,
+                              blank=True, null=True,
+                              related_name='luogo')
     artista_principale = models.ForeignKey(Artista,
-                                 on_delete=models.SET_NULL,
-                                 blank=True, null=True,
-                                 related_name='artista_evento')
+                                           on_delete=models.CASCADE,
+                                           blank=True, null=True,
+                                           related_name='artista')
     prezzo_min = models.DecimalField(max_digits=10,decimal_places=2,blank=True,null=True)
     prezzo_max = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     valuta = models.CharField(max_length=3,blank=True, null=True)
-    disponibilita = models.CharField(max_length=20, choices=DISPONIBILITA, default='disponibile')
+    disponibilita = models.CharField(max_length=15, choices=DISPONIBILITA, default='disponibile')
     categoria = models.ForeignKey(Categoria,
-                                     on_delete=models.SET_NULL,
-                                     blank=True, null=True,
-                                     related_name='categoria_evento')
+                                  on_delete=models.SET_NULL,
+                                  blank=True, null=True,
+                                  related_name='categoria_evento')
     hash_canonico = models.CharField(max_length=64,default='',unique=True)
     note_raw = models.JSONField(blank=True,null=True)
     creato_il= models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.nome_evento} - {self.data_inizio_utc.strftime('%d/%m/%Y')}"
+        return f"{self.nome_evento} - {self.data_inizio_utc.strftime('%d/%m/%Y - %H:%M')}"
 
     class Meta:
-        ordering = ['-data_ora']
+        ordering = ['-data_inizio_utc']
 
 class Piattaforma(models.Model):
     nome = models.CharField(max_length=60,default='', unique=True)
@@ -194,20 +205,14 @@ class EventoPiattaforma(models.Model):
                                     related_name='piattaforma')
     id_evento_piattaforma = models.CharField(max_length=255,blank=True, null=True)
     url = models.CharField(max_length=1024,default='')
-    disponibilita_piattaforma = models.CharField(max_length=20,
-                                                 choices=[('disponibile','Disponibile'),
-                                                          ('limitata','Limitata'),
-                                                          ('non_disponibile','Non Disponibile'),
-                                                          ('sconosciuta','Sconosciuta')],
-                                                 default='disponibile')
-    visto_il = models.DateTimeField()
+    ultima_scansione = models.DateTimeField()
     snapshot_raw = models.JSONField(blank=True,null=True)
     checksum_dati = models.CharField(max_length=64, null=True, blank=True)
     creato_il = models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.evento.nome_evento} su {self.piattaforma.nome}"
+        return f"{self.evento} su {self.piattaforma}"
 
     class Meta:
         unique_together = ('evento', 'piattaforma')
@@ -217,18 +222,24 @@ class Sconti(models.Model):
     percentuale = models.IntegerField()
     descrizione = models.TextField(blank=True,null=True)
 
+    def __str__(self):
+        return f"Durata: {self.durata_mesi} - Precentuale: {self.percentuale}"
+
 class Abbonamento(models.Model):
     utente = models.ForeignKey(UserProfile,
                                on_delete=models.CASCADE,
                                related_name='utente')
-    data_inizio = models.DateTimeField(default=timezone.now)
-    data_fine = models.DateTimeField(blank=True,null=True)
     sconto = models.ForeignKey(Sconti,
-                               on_delete=models.SET_NULL,
+                               on_delete=models.CASCADE,
                                null=True,
                                related_name='sconto')
     prezzo = models.DecimalField(max_digits=10,decimal_places=2,default=0.0)
+    data_inizio = models.DateTimeField(auto_now_add=True)
+    data_fine = models.DateTimeField(blank=True,null=True)
     attivo = models.BooleanField(default=True)
+
+    def __str__(self):
+        return  f"Utente: {self.utente} - Sconto ({self.sconto}) - Inizio: {self.data_inizio} - Fine: {self.data_fine}"
 
 class Monitoraggio(models.Model):
     abbonamento = models.ForeignKey(Abbonamento,
@@ -236,19 +247,25 @@ class Monitoraggio(models.Model):
                                     related_name='abbonamento')
     evento = models.ForeignKey(Evento,
                                 on_delete=models.CASCADE,
-                                related_name='evento')
+                                related_name='evento_monitoraggio')
     frequenza_secondi = models.IntegerField(default=5)
     creato_il= models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Abbonamento ({self.abbonamento}) - Evento: {self.evento}"
 
 class Notifica(models.Model):
     monitoraggio = models.ForeignKey(Monitoraggio,
                                      on_delete=models.CASCADE,
                                      related_name='monitoraggio')
-    tipo = models.CharField(max_length=10,choices=[('email'),('push')], default='push')
-    data_invio = models.DateTimeField(default=timezone.now)
-    esito = models.CharField(max_length=10, choices=[('successo'),('errore')])
+    tipo = models.CharField(max_length=5,choices=[('email','Email'),('push','Push')], default='push')
+    data_invio = models.DateTimeField(auto_now_add=True)
+    esito = models.CharField(max_length=8, choices=[('successo','Successo'),('errore','Errore')])
     testo = models.TextField()
+
+    def __str__(self):
+        return f"Monitoraggio ({self.monitoraggio}) - Tipo: {self.tipo} - Data Invio: {self.data_invio} - Esito: {self.esito}"
 
 # BIGLIETTO
 def biglietto_path(instance,filename):
@@ -257,11 +274,15 @@ def biglietto_path(instance,filename):
 class Biglietto(models.Model):
     nome_file = models.CharField(max_length=255,blank=True,null=True)
     nome_intestatario = models.CharField(max_length=255,blank=True,null=True)
-    sigillo_fiscale = models.CharField(max_length=255,blank=True, null=True)
+    sigillo_fiscale = models.CharField(max_length=16,blank=True, null=True)
     path_file = models.FileField(upload_to=biglietto_path)
     hash_file = models.CharField(max_length=64, blank=True,null=True)
     is_valid = models.BooleanField(default=False)
-    data_caricamento = models.DateTimeField(auto_now_add=True)
+    creato_il= models.DateTimeField(auto_now_add=True)
+    aggiornato_il = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.path_file
 
     def save(self,*args,**kwargs):
         if not self.nome_file and self.path_file:
@@ -274,7 +295,7 @@ class Biglietto(models.Model):
 class Rivendita(models.Model):
     evento = models.ForeignKey(Evento,
                                on_delete=models.CASCADE,
-                               related_name='evento')
+                               related_name='evento_rivendita')
     venditore = models.ForeignKey(UserProfile,
                                   null=True,
                                   on_delete=models.SET_NULL,
@@ -285,7 +306,11 @@ class Rivendita(models.Model):
     url = models.CharField(max_length=1024, default='')
     prezzo = models.DecimalField(max_digits=10,decimal_places=2,default=0.0)
     disponibile = models.BooleanField(default=True)
-    data_caricamento = models.DateTimeField(auto_now_add=True)
+    creato_il = models.DateTimeField(auto_now_add=True)
+    aggiornato_il = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Evento ({self.evento}) - Venditore ({self.venditore}) - Biglietto: {self.biglietto}"
 
 class Acquisto(models.Model):
     rivendita = models.ForeignKey(Rivendita,
@@ -295,4 +320,11 @@ class Acquisto(models.Model):
                                    on_delete=models.CASCADE,
                                    related_name='acquirente')
     data_acquisto = models.DateTimeField(auto_now_add=True)
-    stato = models.CharField(max_length=10, choices=[('in_corso'),('completato'),('rimborsato')], default='in_corso')
+    stato = models.CharField(max_length=10, choices=[('in_corso','In Corso'),
+                                                     ('completato','Completato'),
+                                                     ('rimborsato','Rimborsato')],default='in_corso')
+    creato_il= models.DateTimeField(auto_now_add=True)
+    aggiornato_il = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Rivendita ({self.rivendita}) - Acquirente: {self.acquirente} - Stato: {self.stato}"
