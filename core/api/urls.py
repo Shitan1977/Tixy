@@ -6,7 +6,6 @@ from rest_framework_simplejwt.views import (TokenObtainPairView,TokenRefreshView
 from rest_framework.routers import DefaultRouter
 from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView, UserProfileAPIView
 
-
 # Rotta di test
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -15,11 +14,8 @@ def hello_world(request):
 
 # Router per UserProfile
 router = DefaultRouter()
-
 router.register(r'users', UserProfileViewSet, basename='user')
-
 router.register(r'eventi', EventoViewSet, basename='evento')
-
 router.register(r'biglietti',BigliettoUploadView, basename='biglietti')
 
 urlpatterns = [

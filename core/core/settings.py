@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_yasg',
     'api',
+    'django_cleanup.apps.CleanupConfig', # IMPORTANTE: SEMPRE alla fine dell' elenco
 ]
 AUTH_USER_MODEL = 'api.UserProfile'
 
@@ -124,7 +125,7 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-#Media files (PDF,Images)
+#Media files (PDF)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 

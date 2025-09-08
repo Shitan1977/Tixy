@@ -1,56 +1,95 @@
+import hashlib
+import os.path
 from django.core.exceptions import ValidationError
-from django.utils import timezone as tz
-from datetime import datetime, timezone
-import pikepdf
+from datetime import datetime
 import re
+import pikepdf
+import tempfile
+from pdfminer.high_level import extract_text
 
-def date_check (created,modificated,label):
+def file_validation(file):
+    path_temporaneo = None
     try:
-        now = tz.now()
-        if created is None and modificated is None:
-            raise ValidationError(f'{label} - i Metadati sono vuoti.')
+       with tempfile.NamedTemporaryFile(delete=False,suffix=".pdf") as file_temporaneo:
+           if hasattr(file, "chunks"):
+                for chunk in file.chunks():
+                   file_temporaneo.write(chunk)
+           else:
+               file_temporaneo.write(file.read())
+           file_temporaneo.flush()
+           path_temporaneo = file_temporaneo.name
 
-        if not created and not modificated:
-            raise ValidationError(f'{label} - i Metadati sono vuoti.')
+       hash_file = genera_hash(path_temporaneo)
+       check_meta(path_temporaneo)
+       sigilli = trova_sigilli(path_temporaneo)
 
-        if created and created > now:
-            raise ValidationError(f'{label} - la Data di Creazione è nel futuro.')
+       return sigilli, hash_file
 
-        if modificated and modificated > now:
-            raise ValidationError(f'{label} - la Data di Modifica è nel futuro.')
+    except (OSError, ValidationError) as e:
+        raise ValidationError(f'Errore durante validazione: {str(e)}')
+    finally:
+        if path_temporaneo and os.path.exists(path_temporaneo):
+            os.remove(path_temporaneo)
 
-        if created and modificated and modificated < created:
-            raise ValidationError(f'{label} - la Data di Modifica precede la Data di Creazione')
+def genera_hash(file):
+    h = hashlib.sha256()
+    with open(file, 'rb') as file:
+        for chunk in iter(lambda : file.read(8192), b""):
+            h.update(chunk)
+        return h.hexdigest()
 
-    except OSError as e:
-        raise ValidationError(f'Error validation.date_check: {str(e)}')
-
-def parse_pdf_date(date_str):
-    try:
-        if not date_str:
-            return None
-        date_str = str(date_str)
-
-        m = re.match(r"D:(\d{14})", date_str)
-        if not m:
-            return None
-        return datetime.strptime(m.group(1), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-
-    except (ValueError, TypeError, OSError) as e:
-        raise ValidationError(f'Error validation.parse_pdf_date: {str(e)}')
-
-def pdf_validation(file):
+def check_meta(file):
     try:
         with pikepdf.open(file) as pdf:
             meta = pdf.docinfo
-
+            print(meta)
             created_raw = meta.get('/CreationDate')
-            modificated_raw = meta.get('/ModDate')
-
+            modified_raw = meta.get('/ModDate')
             created = parse_pdf_date(created_raw)
-            modificated = parse_pdf_date(modificated_raw)
+            modified = parse_pdf_date(modified_raw)
+            print(f'CREATO: {created}\nMODIFICATO: {modified}')
+            date_check(created, modified)
 
-            date_check(created,modificated,'PDF')
+    except pikepdf.PdfError as e:
+        raise ValidationError(f'Errore nel controllo dei metadati: {str(e)}')
 
-    except (pikepdf.PdfError, OSError) as e:
-        raise ValidationError(f'Error validation.pdf_validation: {str(e)}')
+def trova_sigilli(path_temporaneo):
+    try:
+        with open(path_temporaneo, 'rb') as t:
+            testo = extract_text(t)
+        print(repr(testo))
+
+        # --- REGEX TICKETONE ---
+        pattern_ticketone = re.compile(r"Sigillo Fiscale:\s*([0-9a-f]+)")
+        sigilli = pattern_ticketone.findall(testo)
+
+        # --- RIMUOVE DUPLICATI e MANTIENE L'ORDINE DI ESTRAZIONE
+        sigilli_unici = list(dict.fromkeys(sigilli))
+
+        print(sigilli_unici)
+        return sigilli_unici
+
+    except Exception as e:
+        raise ValidationError(f'Errore nella lettura del test: {str(e)}')
+
+
+# Controllo sulla data
+def parse_pdf_date(date_str):
+    if not date_str:
+        return None
+    date_str = str(date_str)
+    m = re.match(r"D:(\d{14})", date_str)
+    if not m:
+        return None
+    return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+
+def date_check (created,modified):
+    now = datetime.now()
+    if not created and not modified:
+        raise ValidationError(f'Il file non possiede metadati.')
+    if created and created > now:
+        raise ValidationError(f'La data_creazione del file è nel futuro.')
+    if modified and modified > now:
+        raise ValidationError(f'La data_modifica del file è nel futuro.')
+    if created and modified and modified < created:
+        raise ValidationError(f'La data_modifica del file è prima della data_creazione.')
