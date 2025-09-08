@@ -17,6 +17,7 @@ from .models import Evento, Biglietto
 from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
 from .validation import file_validation
 
+
 User = get_user_model()
 
 # --- USER ---
@@ -182,3 +183,10 @@ class BigliettoUploadView(viewsets.ModelViewSet):
             if nome_temp and default_storage.exists(nome_temp):
                 default_storage.delete(nome_temp)
             return  Response({'error':str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class UserProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
+        return Response(serializer.data)
