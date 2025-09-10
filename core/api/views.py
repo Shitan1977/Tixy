@@ -89,7 +89,7 @@ class EventoViewSet(viewsets.ModelViewSet):
         if a_data:
             qs = qs.filter(data_inizio_utc__lte=a_data)
         return qs
-
+# --- RIVENDITE DI UN EVENTO ---
     @action(detail=True, methods=['get'])
     def rivendite(self, request, pk=None):
         evento = self.get_object()
