@@ -3,8 +3,11 @@ from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import IsAuthenticated
+from .models import Rivendita
+from .serializers import RivenditaSerializer
+from .models import Evento, Biglietto
+from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
+from .validation import file_validation
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django.utils.text import get_valid_filename
@@ -13,10 +16,8 @@ from django.core.files.storage import default_storage
 from django.db import transaction
 from uuid import uuid4
 from datetime import datetime
-from .models import *
-from .serializers import *
-from .validation import file_validation
-
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 
 User = get_user_model()
 
@@ -58,33 +59,6 @@ class UserProfileAPIView(APIView):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
 
-"""   
-class UserProfileAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        serializer = UserProfileSerializer(request.user)
-        return Response(serializer.data)
-"""
-
-# --- OTP EMAIL ---
-class ConfirmOTPView(APIView):
-    @swagger_auto_schema(
-        request_body=OTPVerificationSerializer,
-        operation_summary="Conferma registrazione OTP",
-        operation_description="Inserisci email e codice OTP ricevuto via email per completare la registrazione."
-    )
-    def post(self, request):
-        serializer = OTPVerificationSerializer(data=request.data)
-        if serializer.is_valid():
-            email = serializer.validated_data.get("email")
-            user = User.objects.filter(email=email).first()
-            if user:
-                request.session["user_id"] = user.id  # Salva l'id dell'utente attivato
-                return Response(serializer.validated_data, status=200)
-            return Response({"error": "Utente non trovato"}, status=404)
-        return Response(serializer.errors, status=400)
-
 # --- REGISTRAZIONE PUBBLICA ---
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
@@ -115,6 +89,28 @@ class EventoViewSet(viewsets.ModelViewSet):
         if a_data:
             qs = qs.filter(data_inizio_utc__lte=a_data)
         return qs
+# --- RIVENDITE DI UN EVENTO ---
+    @action(detail=True, methods=['get'])
+    def rivendite(self, request, pk=None):
+        evento = self.get_object()
+        rivendite = Rivendita.objects.filter(evento=evento, disponibile=True)
+        serializer = RivenditaSerializer(rivendite, many=True)
+        return Response(serializer.data)
+
+# --- OTP EMAIL ---
+class ConfirmOTPView(APIView):
+
+    @swagger_auto_schema(
+        request_body=OTPVerificationSerializer,
+        operation_summary="Conferma registrazione OTP",
+        operation_description="Inserisci email e codice OTP ricevuto via email per completare la registrazione."
+    )
+    def post(self, request):
+        serializer = OTPVerificationSerializer(data=request.data)
+        if serializer.is_valid():
+            return Response(serializer.validated_data, status=200)
+        return Response(serializer.errors, status=400)
+
 
 # --- UPLOAD BIGLIETTI ---
 class BigliettoUploadView(viewsets.ModelViewSet):
@@ -197,58 +193,9 @@ class BigliettoUploadView(viewsets.ModelViewSet):
                 default_storage.delete(nome_temp)
             return  Response({'error':str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-# --- View abbozzate per gli alti model
+class UserProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
 
-class RecensioneViewSet(viewsets.ModelViewSet):
-    queryset = Recensione.objects.all()
-    serializer_class = RecensioneSerializer
-
-class ArtistaViewSet(viewsets.ModelViewSet):
-    queryset = Artista.objects.all()
-    serializer_class = ArtistaSerializer
-
-class LuoghiViewSet(viewsets.ModelViewSet):
-    queryset = Luoghi.objects.all()
-    serializer_class = LuoghiSerializer
-
-class CategoriaViewSet(viewsets.ModelViewSet):
-    queryset = Categoria.objects.all()
-    serializer_class = CategoriaSerializer
-
-class PiattaformaViewSet(viewsets.ModelViewSet):
-    queryset = Piattaforma.objects.all()
-    serializer_class = PiattaformaSerializer
-
-class EventoPiattaformaViewSet(viewsets.ModelViewSet):
-    queryset = EventoPiattaforma.objects.all()
-    serializer_class = EventoPiattaformaSerializer
-
-class ScontiViewSet(viewsets.ModelViewSet):
-    queryset = Sconti.objects.all()
-    serializer_class = ScontiSerializer
-
-class AbbonamentoViewSet(viewsets.ModelViewSet):
-    queryset = Abbonamento.objects.all()
-    serializer_class = AbbonamentoSerializer
-
-    @action(detail=False, methods=['get'], url_path='alert_attivi')
-    def alert_attivi(self,request):
-        alert = self.queryset.filter(user=request.user)
-        serializer = self.get_serializer(alert, many=True)
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
-
-class MonitoraggioViewSet(viewsets.ModelViewSet):
-    queryset = Monitoraggio.objects.all()
-    serializer_class = MonitoraggioSerializer
-
-class NotificaViewSet(viewsets.ModelViewSet):
-    queryset = Notifica.objects.all()
-    serializer_class = NotificaSerializer
-
-class RivenditaViewSet(viewsets.ModelViewSet):
-    queryset = Rivendita.objects.all()
-    serializer_class = RivenditaSerializer
-
-class AcquistoViewSet(viewsets.ModelViewSet):
-    queryset = Acquisto.objects.all()
-    serializer_class = AcquistoSerializer
