@@ -3,8 +3,11 @@ from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import IsAuthenticated
+from .models import Rivendita
+from .serializers import RivenditaSerializer
+from .models import Evento, Biglietto
+from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
+from .validation import file_validation
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django.utils.text import get_valid_filename
@@ -13,10 +16,8 @@ from django.core.files.storage import default_storage
 from django.db import transaction
 from uuid import uuid4
 from datetime import datetime
-from .models import Evento, Biglietto
-from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
-from .validation import file_validation
-
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 
 User = get_user_model()
 
@@ -69,25 +70,32 @@ class EventoViewSet(viewsets.ModelViewSet):
     queryset = Evento.objects.all()
     serializer_class = EventoSerializer
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
-    search_fields = ['nome_evento', 'artista', 'citta', 'luogo']
-    ordering_fields = ['data_ora']
-    filterset_fields = ['citta', 'categoria', 'artista', 'stato_disponibilita']
+    search_fields = ['nome_evento', 'artista_principale__nome', 'luogo__nome', 'luogo__citta']
+    ordering_fields = ['data_inizio_utc']
+    filterset_fields = ['luogo__citta', 'categoria', 'artista_principale', 'disponibilita', 'stato']
 
     def get_permissions(self):
         if self.request.method in ['GET', 'HEAD', 'OPTIONS']:
-            return [permissions.AllowAny]
-        return [IsAdminOrIsSelf]
+            return [permissions.AllowAny()]
+        return [IsAdminOrIsSelf()]
 
     def get_queryset(self):
         qs = super().get_queryset()
-        qs = qs.filter(attivo=True, data_ora__gte=now())
+        qs = qs.filter(stato='pianificato', data_inizio_utc__gte=now())
         da_data = self.request.query_params.get('da_data')
         a_data = self.request.query_params.get('a_data')
         if da_data:
-            qs = qs.filter(data_ora__gte=da_data)
+            qs = qs.filter(data_inizio_utc__gte=da_data)
         if a_data:
-            qs = qs.filter(data_ora__lte=a_data)
+            qs = qs.filter(data_inizio_utc__lte=a_data)
         return qs
+
+    @action(detail=True, methods=['get'])
+    def rivendite(self, request, pk=None):
+        evento = self.get_object()
+        rivendite = Rivendita.objects.filter(evento=evento, disponibile=True)
+        serializer = RivenditaSerializer(rivendite, many=True)
+        return Response(serializer.data)
 
 # --- OTP EMAIL ---
 class ConfirmOTPView(APIView):
