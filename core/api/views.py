@@ -3,7 +3,6 @@ from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.decorators import action
-from .serializers import RivenditaSerializer
 from .validation import file_validation
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
@@ -17,7 +16,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from .models import *
 from .serializers import *
-
 
 User = get_user_model()
 
@@ -59,7 +57,6 @@ class UserProfileAPIView(APIView):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
 
-
 # --- OTP EMAIL ---
 class ConfirmOTPView(APIView):
     @swagger_auto_schema(
@@ -78,10 +75,14 @@ class ConfirmOTPView(APIView):
             return Response({"error": "Utente non trovato"}, status=404)
         return Response(serializer.errors, status=400)
 
-# --- REGISTRAZIONE PUBBLICA ---
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
+    permission_classes = [permissions.AllowAny]
+
+class PublicUserDetailView(generics.RetrieveAPIView):
+    queryset = User.objects.all()
+    serializer_class = ShortUserProfileSerializer
     permission_classes = [permissions.AllowAny]
 
 # --- EVENTO ---
@@ -108,6 +109,14 @@ class EventoViewSet(viewsets.ModelViewSet):
         if a_data:
             qs = qs.filter(data_inizio_utc__lte=a_data)
         return qs
+# --- RIVENDITE DI UN EVENTO ---
+    @action(detail=True, methods=['get'])
+    def rivendite(self, request, pk=None):
+        evento = self.get_object()
+        rivendite = Rivendita.objects.filter(evento=evento, disponibile=True)
+        serializer = RivenditaSerializer(rivendite, many=True)
+        return Response(serializer.data)
+
 # --- RIVENDITE DI UN EVENTO ---
     @action(detail=True, methods=['get'])
     def rivendite(self, request, pk=None):
@@ -197,6 +206,9 @@ class BigliettoUploadView(viewsets.ModelViewSet):
                 default_storage.delete(nome_temp)
             return  Response({'error':str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+class UserProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
@@ -233,10 +245,8 @@ class AbbonamentoViewSet(viewsets.ModelViewSet):
     queryset = Abbonamento.objects.all()
     serializer_class = AbbonamentoSerializer
 
-    @action(detail=False, methods=['get'], url_path='alert_attivi')
-    def alert_attivi(self,request):
-        alert = self.queryset.filter(user=request.user)
-        serializer = self.get_serializer(alert, many=True)
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
 
 class MonitoraggioViewSet(viewsets.ModelViewSet):
