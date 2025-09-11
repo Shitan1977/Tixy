@@ -228,3 +228,13 @@ class AcquistoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Acquisto
         fields = '__all__'
+
+class EventoSerializer(serializers.ModelSerializer):
+    piattaforme_collegate = EventoPiattaformaSerializer(many=True, read_only=True)
+    luogo = LuoghiSerializer(read_only=True)
+    categoria = CategoriaSerializer(read_only=True)
+    artista_principale = ArtistaSerializer(read_only=True)
+
+    class Meta:
+        model = Evento
+        fields = 'all'
