@@ -59,14 +59,6 @@ class UserProfileAPIView(APIView):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
 
-"""   
-class UserProfileAPIView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        serializer = UserProfileSerializer(request.user)
-        return Response(serializer.data)
-"""
 
 # --- OTP EMAIL ---
 class ConfirmOTPView(APIView):
@@ -264,4 +256,18 @@ class RivenditaViewSet(viewsets.ModelViewSet):
 class AcquistoViewSet(viewsets.ModelViewSet):
     queryset = Acquisto.objects.all()
     serializer_class = AcquistoSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        return Acquisto.objects.filter(acquirente=self.request.user)
+
+    def perform_create(self, serializer):
+        rivendita = serializer.validated_data['rivendita']
+        
+        if not rivendita.disponibile:
+            raise serializers.ValidationError('Questo biglietto non è più disponibile.')
+
+        rivendita.disponibile = False
+        rivendita.save()
+
+        serializer.save(acquirente=self.request.user, stato='completato')
