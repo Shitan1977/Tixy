@@ -110,7 +110,7 @@ class Artista(models.Model):
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return {self.nome}
+        return self.nome
 
 class Luoghi(models.Model):
     nome = models.CharField(max_length=255, default='')
@@ -123,7 +123,7 @@ class Luoghi(models.Model):
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return {self.nome}
+        return self.nome
 
 class Categoria(models.Model):
     slug = models.CharField(max_length=60,default='',unique=True)
@@ -282,7 +282,7 @@ class Biglietto(models.Model):
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.path_file
+        return self.nome_file
 
     def save(self,*args,**kwargs):
         if not self.nome_file and self.path_file:
