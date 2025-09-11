@@ -303,11 +303,16 @@ class Rivendita(models.Model):
     biglietto = models.ForeignKey(Biglietto,
                                   on_delete=models.CASCADE,
                                   related_name='biglietto')
-    url = models.CharField(max_length=1024, default='')
+    url = models.CharField(max_length=1024, blank=True,null=True)
     prezzo = models.DecimalField(max_digits=10,decimal_places=2,default=0.0)
     disponibile = models.BooleanField(default=True)
     creato_il = models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if not self.url and self.biglietto and self.biglietto.path_file:
+            self.url = self.biglietto.path_file.url
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Evento ({self.evento}) - Venditore ({self.venditore}) - Biglietto: {self.biglietto}"
