@@ -197,8 +197,6 @@ class BigliettoUploadView(viewsets.ModelViewSet):
                 default_storage.delete(nome_temp)
             return  Response({'error':str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-# --- View abbozzate per gli alti model
-
     def get(self, request):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
