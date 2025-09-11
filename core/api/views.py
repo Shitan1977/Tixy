@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from .models import Rivendita
 from .serializers import RivenditaSerializer
 from .models import Evento, Biglietto
-from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer
+from .serializers import UserProfileSerializer, UserRegistrationSerializer, EventoSerializer, BigliettoUploadSerializer,OTPVerificationSerializer, ShortUserProfileSerializer
 from .validation import file_validation
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
@@ -59,10 +59,15 @@ class UserProfileAPIView(APIView):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
 
-# --- REGISTRAZIONE PUBBLICA ---
+# --- REGISTRAZIONE E VISIONE DATI PUBBLICA ---
 class UserRegistrationView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
+    permission_classes = [permissions.AllowAny]
+
+class PublicUserDetailView(generics.RetrieveAPIView):
+    queryset = User.objects.all()
+    serializer_class = ShortUserProfileSerializer
     permission_classes = [permissions.AllowAny]
 
 # --- EVENTO ---

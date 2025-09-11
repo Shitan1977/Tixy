@@ -4,7 +4,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import (TokenObtainPairView,TokenRefreshView)
 from rest_framework.routers import DefaultRouter
-from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView, UserProfileAPIView
+from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView, UserProfileAPIView, PublicUserDetailView
 
 
 # Rotta di test
@@ -37,4 +37,7 @@ urlpatterns = [
 
     #otp
     path('auth/confirm-otp/', ConfirmOTPView.as_view(), name='confirm-otp'),
+
+    # rotta pubblica per i venditori
+    path('public/users/<int:pk>/', PublicUserDetailView.as_view(), name='public-user-detail'),
 ]

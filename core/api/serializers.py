@@ -220,6 +220,11 @@ class BigliettoUploadSerializer(serializers.ModelSerializer):
             rep['path_file'] = request.build_absolute_uri(instance.path_file.url)
         return rep
 
+class ShortUserProfileSerializer(serializers.Serializer):
+    class Meta:
+        model = User
+        fields = ['first_name','last_name']
+
 # 🔹 Serializer Rivendita
 class RivenditaSerializer(serializers.ModelSerializer):
     class Meta:
