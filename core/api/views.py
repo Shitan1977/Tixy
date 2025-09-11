@@ -3,8 +3,8 @@ from rest_framework import viewsets, permissions, status, generics, filters
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.permissions import IsAuthenticated
+from .serializers import RivenditaSerializer
+from .validation import file_validation
 from django.contrib.auth import get_user_model
 from django.utils.timezone import now
 from django.utils.text import get_valid_filename
@@ -13,9 +13,10 @@ from django.core.files.storage import default_storage
 from django.db import transaction
 from uuid import uuid4
 from datetime import datetime
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import MultiPartParser, FormParser
 from .models import *
 from .serializers import *
-from .validation import file_validation
 
 
 User = get_user_model()
@@ -115,6 +116,13 @@ class EventoViewSet(viewsets.ModelViewSet):
         if a_data:
             qs = qs.filter(data_inizio_utc__lte=a_data)
         return qs
+# --- RIVENDITE DI UN EVENTO ---
+    @action(detail=True, methods=['get'])
+    def rivendite(self, request, pk=None):
+        evento = self.get_object()
+        rivendite = Rivendita.objects.filter(evento=evento, disponibile=True)
+        serializer = RivenditaSerializer(rivendite, many=True)
+        return Response(serializer.data)
 
 # --- UPLOAD BIGLIETTI ---
 class BigliettoUploadView(viewsets.ModelViewSet):
@@ -199,6 +207,10 @@ class BigliettoUploadView(viewsets.ModelViewSet):
 
 # --- View abbozzate per gli alti model
 
+    def get(self, request):
+        serializer = UserProfileSerializer(request.user)
+        return Response(serializer.data)
+
 class RecensioneViewSet(viewsets.ModelViewSet):
     queryset = Recensione.objects.all()
     serializer_class = RecensioneSerializer
@@ -252,3 +264,4 @@ class RivenditaViewSet(viewsets.ModelViewSet):
 class AcquistoViewSet(viewsets.ModelViewSet):
     queryset = Acquisto.objects.all()
     serializer_class = AcquistoSerializer
+
