@@ -4,7 +4,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.views import (TokenObtainPairView,TokenRefreshView)
 from rest_framework.routers import DefaultRouter
-from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView, UserProfileAPIView
+from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, BigliettoUploadView, ConfirmOTPView, UserProfileAPIView, RecensioneViewSet, ArtistaViewSet, LuoghiViewSet, CategoriaViewSet, PiattaformaViewSet, EventoPiattaformaViewSet, ScontiViewSet, AbbonamentoViewSet, MonitoraggioViewSet, NotificaViewSet, RivenditaViewSet, AcquistoViewSet
 
 # Rotta di test
 @api_view(['GET'])
@@ -12,11 +12,23 @@ from .views import UserProfileViewSet, UserRegistrationView, EventoViewSet, Bigl
 def hello_world(request):
     return Response({"message": f"Hello, {request.user.email}!"})
 
-# Router per UserProfile
+
 router = DefaultRouter()
 router.register(r'users', UserProfileViewSet, basename='user')
 router.register(r'eventi', EventoViewSet, basename='evento')
 router.register(r'biglietti',BigliettoUploadView, basename='biglietti')
+router.register(r'recensioni', RecensioneViewSet, basename='recensione')
+router.register(r'artisti', ArtistaViewSet, basename='artista')
+router.register(r'luoghi', LuoghiViewSet, basename='luogo')
+router.register(r'categorie', CategoriaViewSet, basename='categoria')
+router.register(r'piattaforme', PiattaformaViewSet, basename='piattaforma')
+router.register(r'eventi-piattaforme', EventoPiattaformaViewSet, basename='evento-piattaforma')
+router.register(r'sconti', ScontiViewSet, basename='sconto')
+router.register(r'abbonamenti', AbbonamentoViewSet, basename='abbonamento')
+router.register(r'monitoraggi', MonitoraggioViewSet, basename='monitoraggio')
+router.register(r'notifiche', NotificaViewSet, basename='notifica')
+router.register(r'rivendite', RivenditaViewSet, basename='rivendita')
+router.register(r'acquisti', AcquistoViewSet, basename='acquisto')
 
 urlpatterns = [
 
