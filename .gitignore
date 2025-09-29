@@ -1,0 +1,6 @@
+
+# Local/dev stuff
+.idea/
+.installed*.txt
+requirements.txt
+frontend_site/
