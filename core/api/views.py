@@ -1,14 +1,17 @@
 # api/views.py
 from decimal import Decimal
+from uuid import uuid4
+from datetime import datetime
 
-from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Q, Count, Avg, Min
 from django.db.models.functions import Lower
+from django.shortcuts import get_object_or_404
 from django.utils.text import get_valid_filename
 import django.utils.timezone as dj_timezone  # usare questo, NON il timezone del modulo datetime
+
 from drf_yasg.utils import swagger_auto_schema
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -18,9 +21,6 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from uuid import uuid4
-from datetime import datetime
 
 from . import serializers as s  # per riferirci a serializer aggiuntivi (es. PerformanceRelatedSerializer)
 from .serializers import (
@@ -41,6 +41,28 @@ from .filters import PerformanceSearchFilter, EventSearchFilter
 from .validation import file_validation
 
 User = get_user_model()
+
+
+# ---------------------------
+# Mixin per evitare errori durante la generazione dello schema Swagger
+# ---------------------------
+
+class SwaggerSafeQuerysetMixin:
+    """
+    Evita errori quando drf-yasg genera lo schema e self.request.user è AnonymousUser.
+    Se la view è 'fake' per Swagger, restituiamo un queryset vuoto.
+    """
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            # Ritorna un queryset vuoto della stessa classe per mantenere compatibilità
+            base_qs = getattr(super(), "get_queryset", lambda: getattr(self, "queryset", None))()
+            if base_qs is not None:
+                return base_qs.none()
+            # fallback: se non esiste super().get_queryset e abbiamo self.queryset
+            if hasattr(self, "queryset") and self.queryset is not None:
+                return self.queryset.none()
+        # default: lascia alla superclasse
+        return super().get_queryset() if hasattr(super(), "get_queryset") else getattr(self, "queryset", None)
 
 
 # ---------------------------
@@ -65,7 +87,7 @@ class IsAdminOrIsSelf(permissions.BasePermission):
 # USER / AUTH
 # ---------------------------
 
-class UserProfileViewSet(viewsets.ModelViewSet):
+class UserProfileViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     """
     Admin: CRUD su tutti gli utenti.
     Utente normale: può solo leggere/aggiornare se stesso (via /me/).
@@ -75,9 +97,12 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs  # sarà .none() grazie al mixin
         if self.request.user.is_staff:
-            return User.objects.all()
-        return User.objects.filter(pk=self.request.user.pk)
+            return qs
+        return qs.filter(pk=self.request.user.pk)
 
     def get_permissions(self):
         if self.action in ["list", "destroy", "create"]:
@@ -257,7 +282,7 @@ def autocomplete(request):
 # UPLOAD BIGLIETTI
 # ---------------------------
 
-class BigliettoUploadView(viewsets.ModelViewSet):
+class BigliettoUploadView(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     queryset = Biglietto.objects.all()
     serializer_class = BigliettoUploadSerializer
     parser_classes = [MultiPartParser, FormParser]
@@ -351,37 +376,46 @@ class ScontiViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminOrReadOnly]
 
 
-class AbbonamentoViewSet(viewsets.ModelViewSet):
+class AbbonamentoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     queryset = Abbonamento.objects.select_related("utente", "plan", "sconto").all()
     serializer_class = AbbonamentoSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs
         if self.request.user.is_staff:
-            return self.queryset
-        return self.queryset.filter(utente=self.request.user)
+            return qs
+        return qs.filter(utente=self.request.user)
 
 
-class MonitoraggioViewSet(viewsets.ModelViewSet):
+class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     queryset = Monitoraggio.objects.select_related("abbonamento", "evento", "performance").all()
     serializer_class = MonitoraggioSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs
         if self.request.user.is_staff:
-            return self.queryset
-        return self.queryset.filter(abbonamento__utente=self.request.user)
+            return qs
+        return qs.filter(abbonamento__utente=self.request.user)
 
 
-class NotificaViewSet(viewsets.ReadOnlyModelViewSet):
+class NotificaViewSet(SwaggerSafeQuerysetMixin, viewsets.ReadOnlyModelViewSet):
     queryset = Notifica.objects.select_related("monitoraggio").all()
     serializer_class = NotificaSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs
         if self.request.user.is_staff:
-            return self.queryset
-        return self.queryset.filter(monitoraggio__abbonamento__utente=self.request.user)
+            return qs
+        return qs.filter(monitoraggio__abbonamento__utente=self.request.user)
 
 
 # ---------------------------
@@ -394,15 +428,18 @@ class RivenditaViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminOrReadOnly]
 
 
-class AcquistoViewSet(viewsets.ModelViewSet):
+class AcquistoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     queryset = Acquisto.objects.select_related("rivendita", "acquirente").all()
     serializer_class = AcquistoSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs
         if self.request.user.is_staff:
-            return self.queryset
-        return self.queryset.filter(acquirente=self.request.user)
+            return qs
+        return qs.filter(acquirente=self.request.user)
 
     def perform_create(self, serializer):
         rivendita = serializer.validated_data['rivendita']
@@ -575,7 +612,7 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
 # ORDERS (creazione atomica, riserva qty)
 # ---------------------------
 
-class OrderTicketViewSet(viewsets.ModelViewSet):
+class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     """
     Crea e visualizza ordini. Create richiede auth.
     La create è transazionale: lock del listing, controlli, decremento qty o chiusura listing.
@@ -585,9 +622,12 @@ class OrderTicketViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs
         if self.request.user.is_staff:
-            return self.queryset
-        return self.queryset.filter(buyer=self.request.user)
+            return qs
+        return qs.filter(buyer=self.request.user)
 
     def create(self, request, *args, **kwargs):
         listing_id = request.data.get("listing")
@@ -750,7 +790,7 @@ class CheckoutSummaryView(generics.RetrieveAPIView):
         user = self.request.user
         if user.is_authenticated and (user.is_staff or order.buyer_id == user.id):
             return order
-        email = self.request.query_params.get("email")
+        email = self.request.queryparams.get("email") if hasattr(self.request, "queryparams") else self.request.query_params.get("email")
         if email and order.buyer.email.lower() == email.lower():
             return order
         raise permissions.PermissionDenied("not allowed")
