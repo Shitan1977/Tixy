@@ -1,3 +1,15 @@
+.idea/
+
+# Exclude frontend from backend repo
+frontend_site/
+
+# Exclude frontend from backend repo
+frontend_site/
+
+# Local helper files (root)
+.installed*.txt
+requirements.txt
+
 # Python / Django
 __pycache__/
 *.py[cod]
