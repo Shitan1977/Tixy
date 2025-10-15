@@ -11,7 +11,7 @@ from django.db.models.functions import Lower
 from django.shortcuts import get_object_or_404
 from django.utils.text import get_valid_filename
 import django.utils.timezone as dj_timezone  # usare questo, NON il timezone del modulo datetime
-
+from .utils import invia_otp_email
 from drf_yasg.utils import swagger_auto_schema
 from django_filters.rest_framework import DjangoFilterBackend
 
@@ -794,3 +794,34 @@ class CheckoutSummaryView(generics.RetrieveAPIView):
         if email and order.buyer.email.lower() == email.lower():
             return order
         raise permissions.PermissionDenied("not allowed")
+
+class ResendOTPView(APIView):
+    """
+    POST { "email": "utente@example.com" }
+    Rigenera e reinvia un OTP. Risposta neutra per evitare account enumeration.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        email = (request.data.get("email") or "").strip().lower()
+        if not email:
+            return Response({"detail": "email required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            # Risposta neutra
+            return Response({"detail": "ok"}, status=status.HTTP_200_OK)
+
+        # Se vuoi inviarlo sempre, lascialo così; altrimenti vincola a not user.is_active
+        try:
+            user.generate_otp()
+            try:
+                invia_otp_email(user)
+            except Exception:
+                # Non bloccare la risposta per errori di invio
+                pass
+        except Exception:
+            pass
+
+        return Response({"detail": "ok"}, status=status.HTTP_200_OK)

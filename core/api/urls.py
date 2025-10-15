@@ -5,7 +5,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework.routers import DefaultRouter
-from .views import PerformanceViewSet, ListingViewSet, OrderTicketViewSet, CheckoutSummaryView, CheckoutStartView
+from .views import PerformanceViewSet, ListingViewSet, OrderTicketViewSet, CheckoutSummaryView, CheckoutStartView, \
+    ResendOTPView
 from .views import (
     # user
     UserProfileViewSet, UserRegistrationView, ConfirmOTPView, UserProfileAPIView, PublicUserDetailView,
@@ -75,6 +76,7 @@ urlpatterns = [
     path('checkout/summary/<int:pk>/', CheckoutSummaryView.as_view(), name='checkout-summary'),
     # search helpers
     path('autocomplete/', autocomplete, name='autocomplete'),
+    path("auth/resend-otp/", ResendOTPView.as_view(), name="auth-resend-otp"),
 ]
 
 # Swagger (già ok)
