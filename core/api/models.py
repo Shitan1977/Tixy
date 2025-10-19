@@ -96,6 +96,8 @@ class UserProfile(AbstractBaseUser, PermissionsMixin):
         return timezone.now() <= self.otp_created_at + timedelta(minutes=10)
 
     class Meta:
+        verbose_name="Utente"
+        verbose_name_plural="Utenti"
         indexes = [
             models.Index(fields=["email"]),
             models.Index(fields=["document_id"]),
@@ -124,6 +126,8 @@ class Artista(models.Model):
         return self.nome or f"artista:{self.pk}"
 
     class Meta:
+        verbose_name="Artista"
+        verbose_name_plural="Artisti"
         indexes = [
             models.Index(fields=["nome"]),
             models.Index(fields=["nome_normalizzato"]),
@@ -149,6 +153,8 @@ class Luoghi(models.Model):
         return self.nome
 
     class Meta:
+        verbose_name="Luogo"
+        verbose_name_plural="Luoghi"
         indexes = [
             models.Index(fields=["nome_normalizzato"]),
             models.Index(fields=["citta_normalizzata"]),
@@ -166,6 +172,8 @@ class Categoria(models.Model):
         return self.nome
 
     class Meta:
+        verbose_name="Categoria"
+        verbose_name_plural="Categorie"
         indexes = [models.Index(fields=["nome"])]
 
 
@@ -202,6 +210,8 @@ class Evento(models.Model):
         return self.nome_evento
 
     class Meta:
+        verbose_name="Evento"
+        verbose_name_plural="Eventi"
         indexes = [
             models.Index(fields=["nome_evento_normalizzato"]),
             models.Index(fields=["stato"]),
@@ -244,6 +254,8 @@ class Performance(models.Model):
         return f"{self.evento.nome_evento} @ {self.luogo.nome} {self.starts_at_utc}"
 
     class Meta:
+        verbose_name="Performance"
+        verbose_name_plural="Performances"
         ordering = ["-starts_at_utc"]
         indexes = [
             models.Index(fields=["evento", "starts_at_utc"]),
@@ -265,7 +277,8 @@ class Piattaforma(models.Model):
         return self.nome
 
     class Meta:
-        verbose_name_plural = "Piattaforme"
+        verbose_name="Piattaforma"
+        verbose_name_plural="Piattaforme"
 
 
 class EventoPiattaforma(models.Model):
@@ -284,6 +297,8 @@ class EventoPiattaforma(models.Model):
         return f"{self.evento} @ {self.piattaforma}"
 
     class Meta:
+        verbose_name="Evento Piattaforma"
+        verbose_name_plural="Evento Piattaforme"
         constraints = [
 
             models.UniqueConstraint(
@@ -310,6 +325,8 @@ class PerformancePiattaforma(models.Model):
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     class Meta:
+        verbose_name="Performance Piattaforma"
+        verbose_name_plural="Performance Piattaforme"
         constraints = [
             models.UniqueConstraint(fields=["piattaforma", "external_perf_id"], name="uq_perf_plat_external"),
         ]
@@ -336,6 +353,8 @@ class InventorySnapshot(models.Model):
     raw_json = models.JSONField(blank=True, null=True)
 
     class Meta:
+        verbose_name="InventorySnapshot"
+        verbose_name_plural="InventorySnapshots"
         indexes = [
             models.Index(fields=["performance", "piattaforma", "taken_at"]),
         ]
@@ -352,6 +371,10 @@ class Sconti(models.Model):
 
     def __str__(self):
         return f"sconto {self.percentuale}% per {self.durata_mesi} mesi"
+    
+    class Meta:
+        verbose_name="Sconto"
+        verbose_name_plural="Sconti"
 
 
 class AlertPlan(models.Model):
@@ -364,6 +387,10 @@ class AlertPlan(models.Model):
 
     def __str__(self):
         return self.name
+    
+    class Meta:
+        verbose_name="Piano Alert"
+        verbose_name_plural="Piani Alert"
 
 
 class Abbonamento(models.Model):
@@ -377,7 +404,10 @@ class Abbonamento(models.Model):
 
     def __str__(self):
         return f"abbonamento {self.id} utente {self.utente_id}"
-
+    
+    class Meta:
+        verbose_name="Abbonamento"
+        verbose_name_plural="Abbonamenti"
 
 class Monitoraggio(models.Model):
     # watch per evento o performance
@@ -393,6 +423,8 @@ class Monitoraggio(models.Model):
         return f"monitoraggio {self.id} target {target}"
 
     class Meta:
+        verbose_name="Monitoraggio"
+        verbose_name_plural="Monitoraggi"
         constraints = [
             models.CheckConstraint(
                 check=(models.Q(evento__isnull=False) | models.Q(performance__isnull=False)),
@@ -416,6 +448,8 @@ class Notifica(models.Model):
         return f"notifica {self.id} {self.channel} {self.status}"
 
     class Meta:
+        verbose_name="Notifica"
+        verbose_name_plural="Notifiche"
         indexes = [
             models.Index(fields=["monitoraggio"]),
             models.Index(fields=["dedupe_key"]),
@@ -430,6 +464,8 @@ class AlertTrigger(models.Model):
     reason = models.CharField(max_length=20, choices=REASON)
 
     class Meta:
+        verbose_name="Trigger Alert"
+        verbose_name_plural="Triggers Alert"
         indexes = [models.Index(fields=["triggered_at"])]
 
 
@@ -439,6 +475,8 @@ class EventFollow(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        verbose_name="Evento Seguito"
+        verbose_name_plural="Eventi Seguiti"
         constraints = [
             models.UniqueConstraint(fields=["user", "event"], name="uq_event_follow")
         ]
@@ -462,6 +500,8 @@ class Recensione(models.Model):
         return f"review {self.id} seller {self.venditore_id}"
 
     class Meta:
+        verbose_name="Recensione"
+        verbose_name_plural="Recensioni"
         constraints = [
             models.UniqueConstraint(fields=["order", "acquirente"], name="uq_review_per_order_author")
         ]
@@ -501,6 +541,8 @@ class Biglietto(models.Model):
         super().save(*args, **kwargs)
 
     class Meta:
+        verbose_name="Biglietto"
+        verbose_name_plural="Biglietti"
         constraints = [
             models.UniqueConstraint(fields=["hash_file"], name="uq_ticket_hash", condition=~models.Q(hash_file=None))
         ]
@@ -539,6 +581,8 @@ class Listing(models.Model):
         return f"listing {self.id} perf {self.performance_id} seller {self.seller_id}"
 
     class Meta:
+        verbose_name="Lista"
+        verbose_name_plural="Liste"
         indexes = [
             models.Index(fields=["performance", "status"]),
             models.Index(fields=["seller"]),
@@ -550,6 +594,8 @@ class ListingTicket(models.Model):
     biglietto = models.ForeignKey(Biglietto, on_delete=models.CASCADE)
 
     class Meta:
+        verbose_name="Lista Biglietto"
+        verbose_name_plural="Liste Biglietti"
         constraints = [
             models.UniqueConstraint(fields=["listing", "biglietto"], name="uq_listing_ticket")
         ]
@@ -575,6 +621,8 @@ class OrderTicket(models.Model):
         return f"order {self.id} listing {self.listing_id} buyer {self.buyer_id}"
 
     class Meta:
+        verbose_name="Ordine Biglietto"
+        verbose_name_plural="Ordini Biglietti"
         indexes = [
             models.Index(fields=["buyer", "status"]),
             models.Index(fields=["created_at"]),
@@ -594,6 +642,10 @@ class Payment(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        verbose_name="Pagamento"
+        verbose_name_plural="Pagamenti"
+
 
 class Rivendita(models.Model):
     evento = models.ForeignKey(Evento, on_delete=models.CASCADE, related_name="rivendite")
@@ -612,6 +664,10 @@ class Rivendita(models.Model):
 
     def __str__(self):
         return f"rivendita {self.id} evento {self.evento_id}"
+    
+    class Meta:
+        verbose_name="Rivendita"
+        verbose_name_plural="Rivendite"
 
 class Acquisto(models.Model):
     rivendita = models.ForeignKey(Rivendita, on_delete=models.CASCADE, related_name="acquisti")
@@ -623,3 +679,7 @@ class Acquisto(models.Model):
 
     def __str__(self):
         return f"acquisto {self.id} rivendita {self.rivendita_id}"
+    
+    class Meta:
+        verbose_name="Acquisto"
+        verbose_name_plural="Acquisti"

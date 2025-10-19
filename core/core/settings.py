@@ -15,6 +15,11 @@ from datetime import timedelta
 import os
 from django.conf.global_settings import MEDIA_URL
 
+# ============== Custom Admin Pannel (Unfold) ==============
+from django.templatetags.static import static
+from django.urls import reverse_lazy
+from django.utils.translation import gettext_lazy as _
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -34,6 +39,18 @@ ALLOWED_HOSTS = ['*']
 # Application definition
 
 INSTALLED_APPS = [
+ # inizio Custom Admin Pannel
+    "unfold",  # before django.contrib.admin
+    "unfold.contrib.filters",  # optional, if special filters are needed
+    "unfold.contrib.forms",  # optional, if special form elements are needed
+    "unfold.contrib.inlines",  # optional, if special inlines are needed
+    "unfold.contrib.import_export",  # optional, if django-import-export package is used
+    "unfold.contrib.guardian",  # optional, if django-guardian package is used
+    "unfold.contrib.simple_history",  # optional, if django-simple-history package is used
+    "unfold.contrib.location_field",  # optional, if django-location-field package is used
+    "unfold.contrib.constance",  # optional, if django-constance package is used
+ # fine Custom Admin Pannel
+
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -187,3 +204,48 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:8000",
     "http://localhost:8000",
 ]
+
+# ============== Custom Admin Pannel (Unfold) ==============
+UNFOLD = {
+    "SITE_TITLE": "Amministrazione",
+    "SITE_HEADER": "Menu", 
+    "SITE_SYMBOL": "menu",
+    # per cambiare l'icona nel quadratino basta usare Google Fonts - Material Icons - il nome che sta in fondo alla descrizione dell'icona che vuoi mettere
+
+    "SITE_FAVICONS":[{
+            "rel": "icon",
+            "sizes": "32x32",
+            "type": "image/svg+xml",
+            "href": lambda request: static("image/favicon-32x32.png"),
+        }, 
+    ],
+
+    "BORDER_RADIUS": "8px",
+    "COLORS": {
+        "primary": {
+            "50": "oklch(0.98 0.02 85)",    # Very light version
+            "100": "oklch(0.95 0.04 85)",   # Light version
+            "200": "oklch(0.90 0.06 85)",   # Light medium
+            "300": "oklch(0.85 0.08 85)",   # Medium light
+            "400": "oklch(0.75 0.12 85)",   # Medium
+            "500": "oklch(0.70 0.16 85)",   # Your main color (rgb(243, 179, 61))
+            "600": "oklch(0.65 0.18 85)",   # Dark medium
+            "700": "oklch(0.55 0.20 85)",   # Dark
+            "800": "oklch(0.45 0.18 85)",   # Very dark
+            "900": "oklch(0.35 0.15 85)",   # Darkest
+            "950": "oklch(0.25 0.12 85)",   # Almost black
+        },
+        "font": {
+            "subtle-light": "var(--color-base-500)",
+            "subtle-dark": "var(--color-base-400)", 
+            "default-light": "var(--color-base-600)",
+            "default-dark": "var(--color-base-300)",
+            "important-light": "var(--color-base-900)",
+            "important-dark": "var(--color-base-100)",
+        },
+    },
+}
+
+  
+
+
