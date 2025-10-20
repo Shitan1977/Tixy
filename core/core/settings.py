@@ -40,6 +40,7 @@ ALLOWED_HOSTS = ['*']
 
 INSTALLED_APPS = [
  # inizio Custom Admin Pannel
+    'api',
     "unfold",  # before django.contrib.admin
     "unfold.contrib.filters",  # optional, if special filters are needed
     "unfold.contrib.forms",  # optional, if special form elements are needed
@@ -61,7 +62,6 @@ INSTALLED_APPS = [
     "django_filters",
     'rest_framework',
     'drf_yasg',
-    'api',
     'django_cleanup.apps.CleanupConfig', # IMPORTANTE: SEMPRE alla fine dell' elenco
 ]
 AUTH_USER_MODEL = 'api.UserProfile'
@@ -82,7 +82,9 @@ ROOT_URLCONF = 'core.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [
+            BASE_DIR / "templates",
+            BASE_DIR / "api" / "templates",],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -209,8 +211,66 @@ CORS_ALLOWED_ORIGINS = [
 UNFOLD = {
     "SITE_TITLE": "Amministrazione",
     "SITE_HEADER": "Menu", 
-    "SITE_SYMBOL": "menu",
+    "SITE_SYMBOL": "store",
     # per cambiare l'icona nel quadratino basta usare Google Fonts - Material Icons - il nome che sta in fondo alla descrizione dell'icona che vuoi mettere
+
+    #"DASHBOARD_CALLBACK": "core.api.views.dashboard_callback",
+
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": _("Gestione Marketplace"),
+                "icon": "shopping_bag",
+                "items": [
+                    {
+                        "title": _("Ordini"),
+                        "icon": "receipt_long",
+                        "link": reverse_lazy("admin:api_orderticket_changelist"),
+                    },
+                    {
+                        "title": _("Annunci di vendita (Listing)"),
+                        "icon": "sell",
+                        "link": reverse_lazy("admin:api_listing_changelist"),
+                    },
+                    {
+                        "title": _("Recensioni"),
+                        "icon": "reviews",
+                        "link": reverse_lazy("admin:api_recensione_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("Catalogo Eventi"),
+                "icon": "confirmation_number",
+                "items": [
+                    {"title": _("Eventi"), "link": reverse_lazy("admin:api_evento_changelist")},
+                    {"title": _("Performance (Date)"), "link": reverse_lazy("admin:api_performance_changelist")},
+                    {"title": _("Artisti"), "link": reverse_lazy("admin:api_artista_changelist")},
+                    {"title": _("Luoghi"), "link": reverse_lazy("admin:api_luoghi_changelist")},
+                    {"title": _("Categorie"), "link": reverse_lazy("admin:api_categoria_changelist")},
+                ],
+            },
+            {
+                "title": _("Utenti e Abbonamenti"),
+                "icon": "people",
+                "items": [
+                    {"title": _("Utenti"), "link": reverse_lazy("admin:api_userprofile_changelist")},
+                    {"title": _("Abbonamenti"), "link": reverse_lazy("admin:api_abbonamento_changelist")},
+                ],
+            },
+            {
+                "title": _("Configurazione"),
+                "icon": "settings",
+                "items": [
+                    {"title": _("Piattaforme"), "link": reverse_lazy("admin:api_piattaforma_changelist")},
+                    {"title": _("Piani Alert"), "link": reverse_lazy("admin:api_alertplan_changelist")},
+                    {"title": _("Sconti"), "link": reverse_lazy("admin:api_sconti_changelist")},
+                ],
+            },
+        ],
+    },
 
     "SITE_FAVICONS":[{
             "rel": "icon",
@@ -246,6 +306,6 @@ UNFOLD = {
     },
 }
 
-  
+
 
 

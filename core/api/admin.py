@@ -349,9 +349,35 @@ class OrderTicketAdmin(ModelAdmin):
     paginator = InfinitePaginator
     show_full_result_count = True
 
-    list_display = ("id", "buyer", "listing", "qty", "total_price", "currency", "status", "created_at")
-    list_filter = ("status", "currency")
-    search_fields = ("buyer__email", "listing__performance__evento__nome_evento")
+    list_display = ("id", "buyer_email", "event_name", "qty", "formatted_total", "status", "created_at_local")
+    list_filter = ("status", "listing__performance__evento__categoria", "created_at")
+    search_fields = ("buyer__email", "listing__performance__evento__nome_evento", "id")
+    date_hierarchy = "created_at"
+    readonly_fields = ("created_at", "paid_at", "delivered_at", "buyer", "listing", "qty", "unit_price", "total_price", "currency")
+
+    def buyer_email(self, obj):
+        return obj.buyer.email
+    buyer_email.short_description = "Acquirente"
+
+    def event_name(self, obj):
+        return shorten(obj.listing.performance.evento.nome_evento, 40)
+    event_name.short_description = "Evento"
+
+    def formatted_total(self, obj):
+        return f"€ {obj.total_price:.2f}"
+    formatted_total.short_description = "Totale Ordine"
+    formatted_total.admin_order_field = "total_price"
+
+    def created_at_local(self, obj):
+        return localtime(obj.created_at).strftime("%d/%m/%Y %H:%M")
+    created_at_local.short_description = "Data Ordine"
+    created_at_local.admin_order_field = "created_at"
+
+    def has_add_permission(self, request):
+        return False # Disabilita la creazione di ordini dall'admin
+
+    def has_change_permission(self, request, obj=None):
+        return False # Rende gli ordini read-only
 
 
 @admin.register(Payment)

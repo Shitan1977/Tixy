@@ -825,3 +825,8 @@ class ResendOTPView(APIView):
             pass
 
         return Response({"detail": "ok"}, status=status.HTTP_200_OK)
+    
+#def dashboard_callback(request, context):
+#    return [
+#        RecentActions(request),
+#    ]
