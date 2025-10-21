@@ -230,7 +230,7 @@ class Performance(models.Model):
     DISP = [
         ("disponibile", "Disponibile"),
         ("limitata", "Limitata"),
-        ("non_disponibile", "NonDisponibile"),
+        ("non_disponibile", "Non Disponibile"),
         ("sconosciuta", "Sconosciuta"),
     ]
 
