@@ -6,7 +6,8 @@ from django import forms
 from django.shortcuts import redirect
 from django.urls import reverse_lazy
 from django.utils.translation import gettext_lazy as _
-from django.http import HttpRequestfrom django.contrib.auth.admin import UserAdmin as BAseUserAdmin
+from django.http import HttpRequest
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
@@ -127,7 +128,7 @@ class AdminUserCreationForm(forms.ModelForm):
 
 
 @admin.register(UserProfile)
-class UserProfileAdmin(BAseUserAdmin, ModelAdmin):
+class UserProfileAdmin(BaseUserAdmin, ModelAdmin):
 # Custom Admin Pannel
     form = UserChangeForm
     add_form = AdminUserCreationForm
