@@ -2,7 +2,11 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from django.utils.timezone import localtime
-from django.contrib.auth.admin import UserAdmin as BAseUserAdmin
+from django import forms
+from django.shortcuts import redirect
+from django.urls import reverse_lazy
+from django.utils.translation import gettext_lazy as _
+from django.http import HttpRequestfrom django.contrib.auth.admin import UserAdmin as BAseUserAdmin
 
 from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
@@ -19,6 +23,7 @@ from unfold.views import UnfoldModelAdminViewMixin
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
 from unfold.admin import ModelAdmin  
 from unfold.paginator import InfinitePaginator
+from unfold.decorators import action
 
 
 admin.site.index_title = "Tixy"
@@ -37,6 +42,15 @@ class CustomAdminPage(admin.AdminSite):
         return custom_urls + urls
     
 adimn_site = CustomAdminPage(name='custom_admin')
+
+class ClickableRowAdminMixin:
+    class Media:
+        js = ("unfold/js/admin-row-click.js",)
+        css = {
+            "all": ("unfold/css/admin-row-click.css",)
+        }
+
+ModelAdmin = type("ModelAdmin", (ClickableRowAdminMixin, ModelAdmin), {})
 
 # ============== Helper ==============
 
@@ -73,11 +87,50 @@ class InventorySnapshotInline(admin.TabularInline):
 
 # ============== User ==============
 
+# Add: admin creation form exposing extra fields + password1/password2
+class AdminUserCreationForm(forms.ModelForm):
+    password1 = forms.CharField(label="Password", widget=forms.PasswordInput, required=False)
+    password2 = forms.CharField(label="Password confirmation", widget=forms.PasswordInput, required=False)
+
+    class Meta:
+        model = UserProfile
+        fields = (
+            "email", "first_name", "last_name",
+            "phone_number", "date_of_birth", "gender",
+            "country", "city", "address", "zip_code", "document_id",
+            "notify_email", "notify_whatsapp", "notify_push",
+            "accepted_terms", "accepted_privacy",
+            "is_active", "is_verified", "is_staff",
+        )
+
+    def clean(self):
+        cleaned = super().clean()
+        p1 = cleaned.get("password1")
+        p2 = cleaned.get("password2")
+        if p1 or p2:
+            if p1 != p2:
+                raise forms.ValidationError("Passwords do not match.")
+        return cleaned
+
+    def save(self, commit=True):
+        user = super().save(commit=False)
+        pwd = self.cleaned_data.get("password1")
+        if pwd:
+            user.set_password(pwd)
+        else:
+            user.set_unusable_password()
+        if commit:
+            user.save()
+            # save m2m if any
+            self.save_m2m()
+        return user
+
+
 @admin.register(UserProfile)
 class UserProfileAdmin(BAseUserAdmin, ModelAdmin):
 # Custom Admin Pannel
     form = UserChangeForm
-    add_form = UserCreationForm
+    add_form = AdminUserCreationForm
     change_password_form = AdminPasswordChangeForm
     paginator = InfinitePaginator
     show_full_result_count = True
@@ -103,14 +156,63 @@ class UserProfileAdmin(BAseUserAdmin, ModelAdmin):
     add_fieldsets = (
         (None, {
             "classes": ("wide",),
-            "fields": ("email", "first_name", "last_name", "password1", "password2"),
+            "fields": (
+                "email", "first_name", "last_name",
+                "phone_number", "date_of_birth", "gender",
+                "country", "city", "address", "zip_code", "document_id",
+                "notify_email", "notify_whatsapp", "notify_push",
+                "accepted_terms", "accepted_privacy",
+                "is_active", "is_verified", "is_staff",
+                #"password1", "password2",
+            ),
         }),
     )
     
     # Optional: If you want to make some fields read-only
     readonly_fields = ("created_at", "updated_at", "last_login")
 
+    def save_model(self, request, obj, form, change):
+        """
+        Ensure password is set and new users are active immediately when created via admin.
+        Supports forms that expose 'password' or the 'password1'/'password2' pair.
+        """
+        if not change:
+            # creation flow: set/confirm password and activate without OTP
+            pwd = None
+            if hasattr(form, "cleaned_data"):
+                data = form.cleaned_data
+                pwd = data.get("password") or data.get("password1")
+            # if no password provided, keep unusable password
+            if pwd:
+                obj.set_password(pwd)
+            else:
+                obj.set_unusable_password()
+            # activate immediately and mark verified if you want
+            obj.is_active = True
+            # optional: mark as verified to skip OTP
+            obj.is_verified = True
+        # Save as usual
+        super().save_model(request, obj, form, change)
 
+        actions_row = ["changelist_row_action"]
+
+    @action(
+        description=_("Changelist row action"),
+        permissions=["changelist_row_action"],
+        url_path="changelist-row-action",
+        attrs={"target": "_blank"}
+    )
+    def changelist_row_action(self, request: HttpRequest, object_id: int):
+        return redirect(
+          reverse_lazy("admin:users_user_changelist")
+        )
+
+    def has_changelist_row_action_permission(self, request: HttpRequest):
+        # Write your own bussiness logic. Code below will always display an action.
+        return True
+    
+    class Media:
+        js = ("static/unfold/js/admin-row-click.js",)
 
 # ============== Catalogo ==============
 
