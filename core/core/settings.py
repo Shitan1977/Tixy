@@ -15,7 +15,7 @@ from datetime import timedelta
 import os
 from django.conf.global_settings import MEDIA_URL
 
-# ============== Custom Admin Pannel (Unfold) ==============
+# ============== Unfold ==============
 from django.templatetags.static import static
 from django.urls import reverse_lazy
 from django.utils.translation import gettext_lazy as _
@@ -39,19 +39,8 @@ ALLOWED_HOSTS = ['*']
 # Application definition
 
 INSTALLED_APPS = [
- # inizio Custom Admin Pannel
-    'api',
-    "unfold",  # before django.contrib.admin
-    "unfold.contrib.filters",  # optional, if special filters are needed
-    "unfold.contrib.forms",  # optional, if special form elements are needed
-    "unfold.contrib.inlines",  # optional, if special inlines are needed
-    "unfold.contrib.import_export",  # optional, if django-import-export package is used
-    "unfold.contrib.guardian",  # optional, if django-guardian package is used
-    "unfold.contrib.simple_history",  # optional, if django-simple-history package is used
-    "unfold.contrib.location_field",  # optional, if django-location-field package is used
-    "unfold.contrib.constance",  # optional, if django-constance package is used
- # fine Custom Admin Pannel
 
+    "unfold",  # before django.contrib.admin
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -62,6 +51,7 @@ INSTALLED_APPS = [
     "django_filters",
     'rest_framework',
     'drf_yasg',
+    "api",
     'django_cleanup.apps.CleanupConfig', # IMPORTANTE: SEMPRE alla fine dell' elenco
 ]
 AUTH_USER_MODEL = 'api.UserProfile'
@@ -83,8 +73,8 @@ TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
         'DIRS': [
-            BASE_DIR / "templates",
-            BASE_DIR / "api" / "templates",],
+            BASE_DIR / "api" / "templates",
+            ],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -142,12 +132,11 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
+# Static e Media files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
 
-#Media files (PDF)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
@@ -207,7 +196,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8000",
 ]
 
-# ============== Custom Admin Pannel (Unfold) ==============
+# ============== Unfold ==============
 UNFOLD = {
     "SITE_TITLE": "Amministrazione",
     "SITE_HEADER": "Menu", 
@@ -215,6 +204,12 @@ UNFOLD = {
     # per cambiare l'icona nel quadratino basta usare Google Fonts - Material Icons - il nome che sta in fondo alla descrizione dell'icona che vuoi mettere
 
     #"DASHBOARD_CALLBACK": "core.api.views.dashboard_callback",
+    "STYLES": [
+        #lambda request: static("css/style.css"),
+    ],
+    "SCRIPTS": [
+        #lambda request: static("js/script.js"),
+    ],
 
     "SIDEBAR": {
         "show_search": True,

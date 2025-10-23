@@ -2,8 +2,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 from django.utils.timezone import localtime
-
-from django.contrib.auth.admin import UserAdmin
+from django.contrib.auth.admin import UserAdmin as BAseUserAdmin
 
 from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
@@ -12,14 +11,32 @@ from .models import (
     Biglietto, Listing, ListingTicket, OrderTicket, Payment,
     Rivendita, Acquisto, Recensione
 )
+from django.urls import path
+from django.views.generic import TemplateView
 
-# Custom Admin Pannel
+# Unfold
+from unfold.views import UnfoldModelAdminViewMixin
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
 from unfold.admin import ModelAdmin  
 from unfold.paginator import InfinitePaginator
 
 
 admin.site.index_title = "Tixy"
+# ============== View generale per i Template Unfold ==============
+class IndexGlobaleView(UnfoldModelAdminViewMixin, TemplateView):
+    title = "Index"
+    permission_required = ()
+    template_name = "admin/index.html"
+
+class CustomAdminPage(admin.AdminSite):
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path('index/',self.admin_view(IndexGlobaleView.as_view(),name='index'))
+        ]
+        return custom_urls + urls
+    
+adimn_site = CustomAdminPage(name='custom_admin')
 
 # ============== Helper ==============
 
@@ -57,7 +74,7 @@ class InventorySnapshotInline(admin.TabularInline):
 # ============== User ==============
 
 @admin.register(UserProfile)
-class UserProfileAdmin(ModelAdmin):
+class UserProfileAdmin(BAseUserAdmin, ModelAdmin):
 # Custom Admin Pannel
     form = UserChangeForm
     add_form = UserCreationForm
@@ -131,9 +148,12 @@ class CategoriaAdmin(ModelAdmin):
 
 @admin.register(Evento)
 class EventoAdmin(ModelAdmin):
-    # Custom Admin Pannel
+    # Opzioni base
+    compressed_fields = True
+    warn_unsaved_form = True
     paginator = InfinitePaginator
     show_full_result_count = True
+
 
     # NB: i campi rimossi dall'evento (luogo, date, prezzi, valuta, disponibilita) ora stanno in Performance
     inlines = [PerformanceInline]
@@ -159,6 +179,7 @@ class EventoAdmin(ModelAdmin):
     def has_image(self, obj):
         return format_html("✅") if obj.immagine_url else "—"
     has_image.short_description = "img"
+
 
 
 @admin.register(Performance)
