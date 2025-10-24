@@ -37,7 +37,6 @@ ALLOWED_HOSTS = ['*']
 
 
 # Application definition
-
 INSTALLED_APPS = [
 
     "unfold",  # before django.contrib.admin
@@ -202,14 +201,6 @@ UNFOLD = {
     "SITE_HEADER": "Menu", 
     "SITE_SYMBOL": "store",
     # per cambiare l'icona nel quadratino basta usare Google Fonts - Material Icons - il nome che sta in fondo alla descrizione dell'icona che vuoi mettere
-
-    #"DASHBOARD_CALLBACK": "core.api.views.dashboard_callback",
-    "STYLES": [
-        #lambda request: static("css/style.css"),
-    ],
-    "SCRIPTS": [
-        #lambda request: static("js/script.js"),
-    ],
 
     "SIDEBAR": {
         "show_search": True,

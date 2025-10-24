@@ -1,9 +1,0 @@
-/* ...new file... */
-.change-list table.results tbody tr:hover,
-.unfold-changelist tbody tr:hover,
-table.result-list tbody tr:hover {
-  background: rgba(0,0,0,0.03);
-}
-.change-list table.results tbody tr {
-  transition: background .08s ease;
-}

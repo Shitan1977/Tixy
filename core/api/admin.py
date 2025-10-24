@@ -16,42 +16,15 @@ from .models import (
     Biglietto, Listing, ListingTicket, OrderTicket, Payment,
     Rivendita, Acquisto, Recensione
 )
-from django.urls import path
-from django.views.generic import TemplateView
 
 # Unfold
-from unfold.views import UnfoldModelAdminViewMixin
 from unfold.forms import AdminPasswordChangeForm, UserChangeForm, UserCreationForm
-from unfold.admin import ModelAdmin  
+from unfold.admin import ModelAdmin, TabularInline
 from unfold.paginator import InfinitePaginator
 from unfold.decorators import action
 
 
 admin.site.index_title = "Tixy"
-# ============== View generale per i Template Unfold ==============
-class IndexGlobaleView(UnfoldModelAdminViewMixin, TemplateView):
-    title = "Index"
-    permission_required = ()
-    template_name = "admin/index.html"
-
-class CustomAdminPage(admin.AdminSite):
-    def get_urls(self):
-        urls = super().get_urls()
-        custom_urls = [
-            path('index/',self.admin_view(IndexGlobaleView.as_view(),name='index'))
-        ]
-        return custom_urls + urls
-    
-adimn_site = CustomAdminPage(name='custom_admin')
-
-class ClickableRowAdminMixin:
-    class Media:
-        js = ("unfold/js/admin-row-click.js",)
-        css = {
-            "all": ("unfold/css/admin-row-click.css",)
-        }
-
-ModelAdmin = type("ModelAdmin", (ClickableRowAdminMixin, ModelAdmin), {})
 
 # ============== Helper ==============
 
@@ -64,23 +37,25 @@ def shorten(text, n=80):
 
 # ============== Inlines ==============
 
-class PerformanceInline(admin.TabularInline):
+class PerformanceInline(TabularInline):
     model = Performance
     extra = 0
     fields = ("luogo", "starts_at_utc", "status", "disponibilita_agg", "prezzo_min", "prezzo_max", "valuta")
     show_change_link = True
 
 
-class PerformancePiattaformaInline(admin.TabularInline):
+class PerformancePiattaformaInline(TabularInline):
     model = PerformancePiattaforma
+    hide_title = True
     extra = 0
     fields = ("piattaforma", "external_perf_id", "url", "ultima_scansione")
     readonly_fields = ("ultima_scansione",)
     show_change_link = True
 
 
-class InventorySnapshotInline(admin.TabularInline):
+class InventorySnapshotInline(TabularInline):
     model = InventorySnapshot
+    hide_title = True
     extra = 0
     fields = ("piattaforma", "taken_at", "availability_status", "min_price", "max_price", "currency")
     readonly_fields = ("piattaforma", "taken_at", "availability_status", "min_price", "max_price", "currency")
@@ -135,7 +110,6 @@ class UserProfileAdmin(BaseUserAdmin, ModelAdmin):
     change_password_form = AdminPasswordChangeForm
     paginator = InfinitePaginator
     show_full_result_count = True
-
 
     list_display = ("id", "email", "first_name", "last_name", "is_active", "is_staff", "is_verified", "created_at")
     list_filter = ("is_active", "is_staff", "is_verified", "accepted_terms", "accepted_privacy")
@@ -449,12 +423,21 @@ class BigliettoAdmin(ModelAdmin):
     list_filter = ("is_valid",)
     search_fields = ("nome_file", "nome_intestatario", "sigillo_fiscale", "hash_file")
 
-
-class ListingTicketInline(admin.TabularInline):
+    
+class ListingTicketInline(TabularInline):
     model = ListingTicket
     extra = 0
 
+@admin.register(ListingTicket)
+class ListingTicketAdmin(ModelAdmin):
+    # Custom Admin Pannel
+    paginator = InfinitePaginator
+    show_full_result_count = True
 
+    list_display = ("id", "listing", "biglietto")
+    search_fields = ("listing__id", "biglietto__nome_file","biglietto__nome_intestatario")
+
+    
 @admin.register(Listing)
 class ListingAdmin(ModelAdmin):
     # Custom Admin Pannel

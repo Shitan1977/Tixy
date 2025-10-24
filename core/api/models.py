@@ -39,38 +39,38 @@ class UserProfile(AbstractBaseUser, PermissionsMixin):
     ]
 
     email = models.EmailField(unique=True)
-    first_name = models.CharField(max_length=100)
-    last_name  = models.CharField(max_length=100)
+    first_name = models.CharField(max_length=100, verbose_name="Nome")
+    last_name  = models.CharField(max_length=100, verbose_name="Cognome")
 
     otp_code = models.CharField(max_length=6, blank=True, null=True)
     otp_created_at = models.DateTimeField(blank=True, null=True)
 
-    phone_number = models.CharField(max_length=20, blank=True, null=True)
-    date_of_birth = models.DateField(blank=True, null=True)
-    gender = models.CharField(max_length=20, choices=GENDER, default="na")
+    phone_number = models.CharField(max_length=20, blank=True, null=True, verbose_name="Numero di telefono")
+    date_of_birth = models.DateField(blank=True, null=True, verbose_name="Data di nascita")
+    gender = models.CharField(max_length=20, choices=GENDER, default="na", verbose_name="Sesso")
 
-    country = models.CharField(max_length=2, blank=True, null=True)  # ISO-3166 alpha2
-    city = models.CharField(max_length=100, blank=True, null=True)
-    address = models.CharField(max_length=255, blank=True, null=True)
+    country = models.CharField(max_length=2, blank=True, null=True, verbose_name="Nazione")  # ISO-3166 alpha2
+    city = models.CharField(max_length=100, blank=True, null=True, verbose_name="Città")
+    address = models.CharField(max_length=255, blank=True, null=True, verbose_name="Indirizzo")
     zip_code = models.CharField(max_length=20, blank=True, null=True)
-    document_id = models.CharField(max_length=50, blank=True, null=True)
+    document_id = models.CharField(max_length=50, blank=True, null=True, verbose_name="Codice documento", help_text="Codice del documento d'identità")
 
-    notify_email = models.BooleanField(default=True)
-    notify_whatsapp = models.BooleanField(default=False)
-    notify_push = models.BooleanField(default=True)
+    notify_email = models.BooleanField(default=True, verbose_name="Notifiche email")
+    notify_whatsapp = models.BooleanField(default=False,verbose_name="Notifiche wahtsapp")
+    notify_push = models.BooleanField(default=True,verbose_name="Notifiche push")
 
-    accepted_terms = models.BooleanField(default=False)
-    accepted_privacy = models.BooleanField(default=False)
-    gdpr_consent_at = models.DateTimeField(blank=True, null=True)
+    accepted_terms = models.BooleanField(default=False, verbose_name="Termini accettati")
+    accepted_privacy = models.BooleanField(default=False, verbose_name="Privacy accettata")
+    gdpr_consent_at = models.DateTimeField(blank=True, null=True, verbose_name="Data accettazione GDPR")
 
     is_verified = models.BooleanField(default=False)
     is_active  = models.BooleanField(default=True)
     is_staff   = models.BooleanField(default=False)
 
-    deleted_at = models.DateTimeField(blank=True, null=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(blank=True, null=True, verbose_name="Data eliminazione")
+    last_login = models.DateTimeField(blank=True, null=True, verbose_name="Data ultimo accesso")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Data creazione")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Data ultimo aggiornamento")
 
     objects = UserProfileManager()
 
@@ -324,6 +324,9 @@ class PerformancePiattaforma(models.Model):
     creato_il = models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
 
+    #def __str__(self):
+     #   return f"{self.performance} @ {self.piattaforma}"
+
     class Meta:
         verbose_name="Performance Piattaforma"
         verbose_name_plural="Performance Piattaforme"
@@ -396,7 +399,7 @@ class AlertPlan(models.Model):
 class Abbonamento(models.Model):
     utente = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="abbonamenti")
     sconto = models.ForeignKey(Sconti, on_delete=models.SET_NULL, null=True, blank=True, related_name="abbonamenti")
-    plan = models.ForeignKey(AlertPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name="abbonamenti")
+    plan = models.ForeignKey(AlertPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name="abbonamenti", verbose_name="Piano Alert")
     prezzo = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     data_inizio = models.DateTimeField(auto_now_add=True)
     data_fine = models.DateTimeField(blank=True, null=True)
@@ -470,8 +473,8 @@ class AlertTrigger(models.Model):
 
 
 class EventFollow(models.Model):
-    user = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="event_follows")
-    event = models.ForeignKey(Evento, on_delete=models.CASCADE, related_name="followers")
+    user = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="event_follows", verbose_name="Utente")
+    event = models.ForeignKey(Evento, on_delete=models.CASCADE, related_name="followers", verbose_name="Evento")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -530,7 +533,7 @@ class Biglietto(models.Model):
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.nome_file or f"ticket:{self.pk}"
+        return f"{self.nome_file} ({self.nome_intestatario})" or f"ticket:{self.pk}"
 
     def save(self, *args, **kwargs):
         if not self.nome_file and self.path_file:
@@ -592,6 +595,9 @@ class Listing(models.Model):
 class ListingTicket(models.Model):
     listing = models.ForeignKey(Listing, on_delete=models.CASCADE)
     biglietto = models.ForeignKey(Biglietto, on_delete=models.CASCADE)
+
+    def __str__(self):
+        return f"{self.listing.id} - {self.listing.seller} @ {self.biglietto}"
 
     class Meta:
         verbose_name="Lista Biglietto"
