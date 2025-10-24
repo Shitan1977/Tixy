@@ -112,6 +112,7 @@ class UserProfileAdmin(BaseUserAdmin, ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "email", "first_name", "last_name", "is_active", "is_staff", "is_verified", "created_at")
+    list_display_links = ("id", "email", "first_name", "last_name",)
     list_filter = ("is_active", "is_staff", "is_verified", "accepted_terms", "accepted_privacy")
     search_fields = ("email", "first_name", "last_name", "document_id")
 
@@ -198,6 +199,7 @@ class ArtistaAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "nome", "tipo", "nome_normalizzato", "creato_il", "aggiornato_il")
+    list_display_links = ("id", "nome", )
     search_fields = ("nome", "nome_normalizzato")
     list_filter = ("tipo",)
 
@@ -209,6 +211,7 @@ class LuoghiAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "nome", "citta", "stato_iso", "nome_normalizzato", "creato_il")
+    list_display_links = ("id", "nome", )
     search_fields = ("nome", "citta", "nome_normalizzato")
     list_filter = ("stato_iso",)
 
@@ -220,6 +223,7 @@ class CategoriaAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "slug", "nome")
+    list_display_links = ("id", "slug","nome", )
     search_fields = ("slug", "nome")
 
 
@@ -239,6 +243,7 @@ class EventoAdmin(ModelAdmin):
         "num_performances", "first_performance", "last_update",
         "has_image",
     )
+    list_display_links = ("id", "slug","nome_evento", )
     list_filter = ("stato", "categoria")
     search_fields = ("slug", "nome_evento", "nome_evento_normalizzato", "artista_principale__nome")
     readonly_fields = ("creato_il", "aggiornato_il")
@@ -270,6 +275,7 @@ class PerformanceAdmin(ModelAdmin):
         "id", "evento", "luogo", "starts_at_utc", "status",
         "disponibilita_agg", "prezzo_min", "prezzo_max", "valuta"
     )
+    list_display_links = ("id", "evento", )
     list_filter = ("status", "disponibilita_agg", "valuta", "luogo__citta")
     search_fields = ("evento__nome_evento", "luogo__nome", "luogo__citta")
     date_hierarchy = "starts_at_utc"
@@ -284,6 +290,7 @@ class PiattaformaAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "nome", "dominio", "attivo")
+    list_display_links = ("id", "nome", )
     list_filter = ("attivo",)
     search_fields = ("nome", "dominio")
 
@@ -295,6 +302,7 @@ class EventoPiattaformaAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "evento", "piattaforma", "id_evento_piattaforma", "ultima_scansione")
+    list_display_links = ("id", "evento", "piattaforma", )
     search_fields = ("evento__nome_evento", "piattaforma__nome", "id_evento_piattaforma")
     list_filter = ("piattaforma",)
 
@@ -306,6 +314,7 @@ class PerformancePiattaformaAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "performance", "piattaforma", "external_perf_id", "ultima_scansione")
+    list_display_links = ("id", "performance", "piattaforma", )
     search_fields = ("performance__evento__nome_evento", "external_perf_id", "piattaforma__nome")
     list_filter = ("piattaforma",)
 
@@ -317,6 +326,7 @@ class InventorySnapshotAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "performance", "piattaforma", "taken_at", "availability_status", "min_price", "max_price", "currency")
+    list_display_links = ("id", "performance", "piattaforma", )
     list_filter = ("availability_status", "currency", "piattaforma")
     search_fields = ("performance__evento__nome_evento", "piattaforma__nome")
     date_hierarchy = "taken_at"
@@ -331,6 +341,7 @@ class ScontiAdmin(ModelAdmin):
     show_full_result_count = True 
 
     list_display = ("id", "durata_mesi", "percentuale", "descrizione")
+    list_display_links = ("id","durata_mesi", "percentuale", )
 
 
 @admin.register(AlertPlan)
@@ -340,7 +351,7 @@ class AlertPlanAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "name", "duration_days", "price", "currency", "max_events", "max_push_per_day")
-
+    list_display_links = ("id","name",)
 
 @admin.register(Abbonamento)
 class AbbonamentoAdmin(ModelAdmin):
@@ -349,6 +360,7 @@ class AbbonamentoAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "utente", "plan", "sconto", "prezzo", "data_inizio", "data_fine", "attivo")
+    list_display_links = ("id","utente","plan")
     list_filter = ("attivo", "plan")
     search_fields = ("utente__email",)
 
@@ -361,6 +373,7 @@ class MonitoraggioAdmin(ModelAdmin):
 
     # NB: rimosso frequenza_secondi; ora c'e' filters_json + target evento/performance
     list_display = ("id", "abbonamento", "target", "creato_il", "aggiornato_il")
+    list_display_links = ("id","abbonamento",)
     search_fields = ("abbonamento__utente__email", "evento__nome_evento", "performance__evento__nome_evento")
     readonly_fields = ("creato_il", "aggiornato_il")
 
@@ -381,6 +394,7 @@ class NotificaAdmin(ModelAdmin):
 
     # NB: rinominati: tipo->channel, data_invio->sent_at, esito->status, testo->message
     list_display = ("id", "monitoraggio", "channel", "status", "sent_at", "message_short")
+    list_display_links = ("id","monitoraggio",)
     list_filter = ("channel", "status")
     search_fields = ("monitoraggio__abbonamento__utente__email",)
     readonly_fields = ("sent_at",)
@@ -397,6 +411,7 @@ class AlertTriggerAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "monitoraggio", "reason", "triggered_at", "snapshot")
+    list_display_links = ("id","monitoraggio",)
     list_filter = ("reason",)
     date_hierarchy = "triggered_at"
 
@@ -408,6 +423,7 @@ class EventFollowAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "user", "event", "created_at")
+    list_display_links = ("id","user","event")
     search_fields = ("user__email", "event__nome_evento")
 
 
@@ -420,6 +436,7 @@ class BigliettoAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "nome_file", "nome_intestatario", "sigillo_fiscale", "is_valid", "creato_il")
+    list_display_links = ("id","nome_file","nome_intestatario")
     list_filter = ("is_valid",)
     search_fields = ("nome_file", "nome_intestatario", "sigillo_fiscale", "hash_file")
 
@@ -435,6 +452,7 @@ class ListingTicketAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "listing", "biglietto")
+    list_display_links = ("id","listing","biglietto")
     search_fields = ("listing__id", "biglietto__nome_file","biglietto__nome_intestatario")
 
     
@@ -446,6 +464,7 @@ class ListingAdmin(ModelAdmin):
 
     inlines = [ListingTicketInline]
     list_display = ("id", "seller", "performance", "qty", "price_each", "currency", "delivery_method", "status", "expires_at")
+    list_display_links = ("id","seller","performance")
     list_filter = ("status", "currency", "delivery_method")
     search_fields = ("seller__email", "performance__evento__nome_evento", "performance__luogo__nome")
 
@@ -457,6 +476,7 @@ class OrderTicketAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "buyer_email", "event_name", "qty", "formatted_total", "status", "created_at_local")
+    list_display_links = ("id","buyer_email","event_name")
     list_filter = ("status", "listing__performance__evento__categoria", "created_at")
     search_fields = ("buyer__email", "listing__performance__evento__nome_evento", "id")
     date_hierarchy = "created_at"
@@ -494,6 +514,7 @@ class PaymentAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "order", "provider", "amount", "currency", "status", "created_at")
+    list_display_links = ("id","order",)
     list_filter = ("provider", "status")
     search_fields = ("order__buyer__email",)
 
@@ -506,6 +527,7 @@ class RivenditaAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "evento", "venditore", "biglietto", "prezzo", "disponibile", "creato_il")
+    list_display_links = ("id","evento","venditore","biglietto")
     list_filter = ("disponibile",)
     search_fields = ("evento__nome_evento", "venditore__email")
 
@@ -517,6 +539,7 @@ class AcquistoAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "rivendita", "acquirente", "stato", "data_acquisto")
+    list_display_links = ("id","rivendita","acquirente")
     list_filter = ("stato",)
     search_fields = ("acquirente__email",)
 
@@ -530,6 +553,7 @@ class RecensioneAdmin(ModelAdmin):
     show_full_result_count = True
 
     list_display = ("id", "venditore", "acquirente", "rating", "order", "creato_il", "testo_short")
+    list_display_links = ("id","venditore","acquirente")
     list_filter = ("rating",)
     search_fields = ("venditore__email", "acquirente__email")
 
