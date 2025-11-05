@@ -20,6 +20,16 @@ from django.templatetags.static import static
 from django.urls import reverse_lazy
 from django.utils.translation import gettext_lazy as _
 
+
+#celery per pdf
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_RESULT_BACKEND = "redis://localhost:6379/1"  # oppure "django-db"
+CELERY_TASK_ALWAYS_EAGER = False  # in dev puoi mettere True
+CELERY_TASK_TIME_LIMIT = 180
+CELERY_TASK_SOFT_TIME_LIMIT = 160
+
+
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -51,6 +61,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_yasg',
     "api",
+    "django_celery_results",
     'django_cleanup.apps.CleanupConfig', # IMPORTANTE: SEMPRE alla fine dell' elenco
 ]
 AUTH_USER_MODEL = 'api.UserProfile'

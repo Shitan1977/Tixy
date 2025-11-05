@@ -1,9 +1,11 @@
 asgiref==3.9.1
+celery==5.4.0
 cffi==2.0.0
 charset-normalizer==3.4.3
 cryptography==46.0.1
 Deprecated==1.2.18
 Django==5.2.6
+django-celery-results==2.5.1
 django-cleanup==9.0.0
 django-cors-headers==4.9.0
 django-filter==25.1
@@ -24,5 +26,6 @@ PyYAML==6.0.2
 sqlparse==0.5.3
 typing_extensions==4.15.0
 tzdata==2025.2
+redis==5.0.7
 uritemplate==4.2.0
 wrapt==1.17.3

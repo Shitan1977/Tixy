@@ -1,44 +1,53 @@
-# api/views.py
 from decimal import Decimal
 from uuid import uuid4
 from datetime import datetime
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import FieldError, ValidationError
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Q, Count, Avg, Min
 from django.db.models.functions import Lower
 from django.shortcuts import get_object_or_404
 from django.utils.text import get_valid_filename
-import django.utils.timezone as dj_timezone  # usare questo, NON il timezone del modulo datetime
-from .utils import invia_otp_email
-from drf_yasg.utils import swagger_auto_schema
+import django.utils.timezone as dj_timezone
+from rest_framework.serializers import ModelSerializer
 from django_filters.rest_framework import DjangoFilterBackend
-
-from rest_framework import viewsets, permissions, status, generics, filters, mixins
+from rest_framework import viewsets, permissions, status, generics, filters, mixins, serializers
 from rest_framework.decorators import action, api_view, permission_classes
+from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import serializers as s  # per riferirci a serializer aggiuntivi (es. PerformanceRelatedSerializer)
+from drf_yasg.utils import swagger_auto_schema
+
+from .utils import invia_otp_email
+from .validation import file_validation
+from .filters import PerformanceSearchFilter, EventSearchFilter
+
+from . import serializers as s
 from .serializers import (
+    MyPurchasesItemSerializer,
     UserProfileSerializer, ShortUserProfileSerializer, UserRegistrationSerializer, OTPVerificationSerializer,
     RecensioneSerializer, ArtistaSerializer, LuoghiSerializer, CategoriaSerializer,
-    PiattaformaSerializer, EventoPiattaformaSerializer,
-    EventoSerializer, PerformanceMiniSerializer,
+    PiattaformaSerializer, EventoPiattaformaSerializer, EventoSerializer, PerformanceMiniSerializer,
     ScontiSerializer, AbbonamentoSerializer, MonitoraggioSerializer, NotificaSerializer,
-    BigliettoUploadSerializer, RivenditaSerializer, AcquistoSerializer, ListingCardSerializer, OrderTicketSerializer,
-    OrderSummarySerializer, CheckoutStartSerializer,
+    BigliettoUploadSerializer, RivenditaSerializer, AcquistoSerializer, ListingCardSerializer,
+    OrderTicketSerializer, OrderSummarySerializer, CheckoutStartSerializer,
+    # aggiunti dal blocco di metà file:
+    TicketDownloadSerializer, MarkListingSoldSerializer,
+    TicketUploadPDFSerializer, TicketUploadURLSerializer, TicketUploadReviewSerializer,
+    ListingCreateFromUploadSerializer, MyResaleListItemSerializer,
 )
+
 from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
     Piattaforma, EventoPiattaforma, Sconti, Abbonamento, Monitoraggio,
-    Notifica, Biglietto, Rivendita, Acquisto, Listing, OrderTicket,
+    Notifica, Biglietto, Rivendita, Acquisto, Listing, OrderTicket, Recensione,
+    TicketUpload, SupportTicket, SupportMessage, SupportAttachment
 )
-from .filters import PerformanceSearchFilter, EventSearchFilter
-from .validation import file_validation
 
 User = get_user_model()
 
@@ -52,6 +61,7 @@ class SwaggerSafeQuerysetMixin:
     Evita errori quando drf-yasg genera lo schema e self.request.user è AnonymousUser.
     Se la view è 'fake' per Swagger, restituiamo un queryset vuoto.
     """
+
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             # Ritorna un queryset vuoto della stessa classe per mantenere compatibilità
@@ -71,6 +81,7 @@ class SwaggerSafeQuerysetMixin:
 
 class IsAdminOrReadOnly(permissions.BasePermission):
     """SAFE methods per tutti, modifica solo admin."""
+
     def has_permission(self, request, view):
         if request.method in permissions.SAFE_METHODS:
             return True
@@ -79,6 +90,7 @@ class IsAdminOrReadOnly(permissions.BasePermission):
 
 class IsAdminOrIsSelf(permissions.BasePermission):
     """Per risorse utente: o admin, o il proprietario dell'oggetto."""
+
     def has_object_permission(self, request, view, obj):
         return bool(request.user and (request.user.is_staff or obj == request.user))
 
@@ -124,6 +136,7 @@ class UserProfileViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 
 class UserProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
+
     def get(self, request):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
@@ -403,6 +416,108 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             return qs
         return qs.filter(abbonamento__utente=self.request.user)
 
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="my",
+        permission_classes=[permissions.IsAuthenticated],
+    )
+    def my(self, request):
+        """
+        GET /api/monitoraggi/my/?page=&page_size=
+        Lista dei monitoraggi dell'utente loggato (paginata).
+        """
+        # riuso la logica + eventuali filtri standard
+        qs = self.filter_queryset(
+            self.get_queryset().filter(abbonamento__utente=request.user)
+        )
+
+        # se hai il serializer "ricco", usalo; altrimenti resta quello base
+        try:
+            ser_class = s.MonitoraggioListSerializer
+        except AttributeError:
+            ser_class = self.get_serializer_class()
+
+        page = self.paginate_queryset(qs)
+        ser = ser_class(page or qs, many=True, context={"request": request})
+        return (
+            self.get_paginated_response(ser.data)
+            if page is not None
+            else Response(ser.data)
+
+        )
+
+    # ...
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="my-pro",
+        permission_classes=[permissions.IsAuthenticated],
+    )
+    def my_pro(self, request):
+        """
+        GET /api/monitoraggi/my-pro/?page=&page_size=
+        Elenco dei monitoraggi legati ad abbonamenti PRO dell'utente loggato.
+        Serializzazione 'piatta' per la UI (date + stato).
+        """
+        qs_base = (
+            self.get_queryset()
+            .select_related(
+                "abbonamento", "abbonamento__plan",
+                "evento",
+                "performance", "performance__evento",
+            )
+            .filter(abbonamento__utente=request.user)
+        )
+
+        qs = qs_base
+        tried_db_filter = False
+
+        # 1) Tentativo ORM "ricco" (se il backend lo consente)
+        try:
+            tried_db_filter = True
+            qs = qs.filter(
+                Q(abbonamento__plan__slug__icontains="pro")
+                | Q(abbonamento__plan__nome__icontains="pro")
+                | Q(abbonamento__plan__titolo__icontains="pro")
+                | Q(abbonamento__plan__tipo__iexact="PRO")
+                | Q(abbonamento__plan__livello__iexact="PRO")
+            )
+        except FieldError:
+            # Join/lookup non consentite → si va di fallback Python
+            qs = qs_base
+
+        # 2) Se il tentativo ORM non è possibile/affidabile, fallback Python
+        if not tried_db_filter or qs is qs_base:
+            rows = list(qs)  # materializziamo
+
+            def is_pro(item):
+                p = getattr(item.abbonamento, "plan", None)
+                if not p:
+                    return False
+                txt = " ".join([
+                    str(getattr(p, "slug", "") or ""),
+                    str(getattr(p, "nome", "") or ""),
+                    str(getattr(p, "titolo", "") or ""),
+                    str(getattr(p, "tipo", "") or ""),
+                    str(getattr(p, "livello", "") or ""),
+                ]).lower()
+                # euristica: contiene "pro" o è esattamente "pro"
+                return ("pro" in txt) or (txt.strip() == "pro")
+
+            rows = [r for r in rows if is_pro(r)]
+
+            # paginazione DRF funziona anche con liste
+            page = self.paginate_queryset(rows)
+            ser = s.ProSubscriptionItemSerializer(page or rows, many=True, context={"request": request})
+            return self.get_paginated_response(ser.data) if page is not None else Response(ser.data)
+
+        # 3) Caso felice: filtro ORM riuscito → normale paginazione
+        page = self.paginate_queryset(qs)
+        ser = s.ProSubscriptionItemSerializer(page or qs, many=True, context={"request": request})
+        return self.get_paginated_response(ser.data) if page is not None else Response(ser.data)
+
 
 class NotificaViewSet(SwaggerSafeQuerysetMixin, viewsets.ReadOnlyModelViewSet):
     queryset = Notifica.objects.select_related("monitoraggio").all()
@@ -444,7 +559,7 @@ class AcquistoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         rivendita = serializer.validated_data['rivendita']
         if not rivendita.disponibile:
-            raise s.serializers.ValidationError('questo biglietto non è più disponibile.')
+            raise ValidationError('questo biglietto non è più disponibile.')
         with transaction.atomic():
             rivendita.disponibile = False
             rivendita.save(update_fields=["disponibile"])
@@ -542,6 +657,27 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
     ordering_fields = ["price_each", "created_at"]
     ordering = ["price_each"]
 
+    @action(detail=True, methods=["get"], url_path="download", permission_classes=[IsAuthenticated])
+    def download_ticket(self, request, pk=None):
+        listing = self.get_object()
+        if not (request.user.is_staff or listing.seller_id == request.user.id):
+            return Response({"detail": "not allowed"}, status=403)
+        ser = TicketDownloadSerializer(data={"listing_id": listing.id}, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        out = ser.save()
+        return Response(out, status=200)
+
+    @action(detail=True, methods=["post"], url_path="mark_sold", permission_classes=[IsAuthenticated])
+    def mark_sold(self, request, pk=None):
+        listing = self.get_object()
+        if not (request.user.is_staff or listing.seller_id == request.user.id):
+            return Response({"detail": "not allowed"}, status=403)
+        payload = request.data.copy()
+        payload["listing_id"] = listing.id
+        ser = MarkListingSoldSerializer(data=payload, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        out = ser.save()
+        return Response(out, status=200)
     def get_queryset(self):
         return (
             Listing.objects
@@ -675,6 +811,36 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+    @action(detail=True, methods=["get"], url_path="download", permission_classes=[permissions.IsAuthenticated])
+    def download(self, request, pk=None):
+        """
+        GET /api/orders/{id}/download/
+        Ritorna (o reindirizza a) una URL temporanea per scaricare il biglietto.
+        Sicurezza: solo il buyer (o staff) può scaricare.
+        """
+        order = self.get_object()
+
+        if not (request.user.is_staff or order.buyer_id == request.user.id):
+            raise PermissionDenied("not allowed")
+
+        # TODO: sostituisci questa parte con la tua logica di storage (filesystem/S3/signed URL)
+        ticket_file_path = None
+
+        # Esempio: se il Listing ha un campo file
+        if hasattr(order.listing, "ticket_file") and order.listing.ticket_file:
+            ticket_file_path = order.listing.ticket_file.name
+
+        # Esempio alternativo: se hai un Biglietto collegato all'ordine
+        # biglietto = getattr(order, "biglietto", None)
+        # if biglietto and biglietto.path_file:
+        #     ticket_file_path = biglietto.path_file.name
+
+        if not ticket_file_path:
+            raise NotFound("ticket not available yet")
+
+        # Placeholder: ritorna una URL di download protetta
+        return Response({"url": f"/protected-download/{ticket_file_path}"}, status=200)
+
 
 # ---------------------------
 # CHECKOUT START + SUMMARY (senza pagamenti per ora)
@@ -790,10 +956,13 @@ class CheckoutSummaryView(generics.RetrieveAPIView):
         user = self.request.user
         if user.is_authenticated and (user.is_staff or order.buyer_id == user.id):
             return order
-        email = self.request.queryparams.get("email") if hasattr(self.request, "queryparams") else self.request.query_params.get("email")
+        email = self.request.queryparams.get("email") if hasattr(self.request,
+                                                                 "queryparams") else self.request.query_params.get(
+            "email")
         if email and order.buyer.email.lower() == email.lower():
             return order
         raise permissions.PermissionDenied("not allowed")
+
 
 class ResendOTPView(APIView):
     """
@@ -825,8 +994,317 @@ class ResendOTPView(APIView):
             pass
 
         return Response({"detail": "ok"}, status=status.HTTP_200_OK)
-    
-#def dashboard_callback(request, context):
+
+
+# def dashboard_callback(request, context):
 #    return [
 #        RecentActions(request),
 #    ]
+
+class RecensioneViewSet(viewsets.ModelViewSet):
+    """
+    /api/reviews/        [GET list, POST create]
+    /api/reviews/{id}/   [GET retrieve]
+    /api/reviews/stats/  [GET venditore=? -> {avg,count}]
+    """
+    queryset = Recensione.objects.select_related("venditore", "acquirente", "order").all()
+    serializer_class = RecensioneSerializer
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ["venditore", "acquirente", "order"]
+    ordering_fields = ["creato_il", "rating"]
+    ordering = ["-creato_il"]
+
+    def get_permissions(self):
+        # lettura pubblica; create solo autenticati
+        if self.action in ["list", "retrieve", "stats"]:
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
+
+    @action(detail=False, methods=["get"], permission_classes=[permissions.AllowAny])
+    def stats(self, request):
+        venditore = request.query_params.get("venditore") or request.query_params.get("seller")
+        if not venditore:
+            return Response({"detail": "venditore required"}, status=400)
+        qs = self.get_queryset().filter(venditore_id=venditore)
+        agg = qs.aggregate(avg=Avg("rating"), count=Count("id"))
+        avg = agg["avg"] or 0
+        return Response({"avg": round(float(avg), 2), "count": int(agg["count"] or 0)})
+
+
+class MyPurchasesView(generics.ListAPIView):
+    """
+    GET /api/my/purchases/?page=&page_size=&past=0|1
+    - Default: past=0 => SOLO eventi FUTURI (non scaduti)
+    - past=1 => SOLO eventi PASSATI (storico)
+    Ordinamento: data evento DESC (poi id DESC)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        # Precarichiamo tutto ciò che serve alla UI
+        qs = (
+            OrderTicket.objects
+            .select_related(
+                "listing",
+                "listing__performance",
+                "listing__performance__evento",
+                "listing__performance__luogo",
+            )
+            .filter(buyer=self.request.user)
+        )
+
+        # Filtra per data evento
+        now = dj_timezone.now()
+        past = (self.request.query_params.get("past") == "1")
+
+        # Campo data della performance (adatta se il tuo nome è diverso)
+        perf_field = "listing__performance__starts_at_utc"
+
+        if past:
+            qs = qs.filter(**{f"{perf_field}__lt": now})
+        else:
+            qs = qs.filter(**{f"{perf_field}__gte": now})
+
+        # Ordinamento: data evento DESC, poi id DESC
+        qs = qs.order_by(f"-{perf_field}", "-id")
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        qs = self.get_queryset()
+        page = self.paginate_queryset(qs)
+
+        def map_row(o):
+            perf = getattr(o.listing, "performance", None)
+            ev = getattr(perf, "evento", None)
+            luogo = getattr(perf, "luogo", None)
+
+            starts = getattr(perf, "starts_at_utc", None)
+            venue_name = getattr(luogo, "nome", "") if luogo else ""
+
+            return {
+                "id": o.id,
+                "listing_id": o.listing_id,
+                "event_title": getattr(ev, "nome_evento", "") if ev else "",
+                "venue": venue_name,
+                "performance_datetime": starts,
+                "qty": o.qty,
+                "price_total": str(o.total_price),
+                "currency": o.currency,
+                "status": o.status,
+                "download_api_url": f"/api/orders/{o.id}/download/",
+            }
+
+        data = [map_row(x) for x in (page or qs)]
+        ser = MyPurchasesItemSerializer(data, many=True)
+
+        # MyPurchasesSerializer è "read only", quindi passo direttamente i dict.
+
+        return (
+            self.get_paginated_response(ser.data)
+            if page is not None else Response(ser.data)
+        )
+
+
+class TicketUploadViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @swagger_auto_schema(request_body=TicketUploadPDFSerializer, tags=["Upload biglietti"])
+    @action(detail=False, methods=["post"], url_path="pdf")
+    def upload_pdf(self, request):
+        ser = TicketUploadPDFSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        out = ser.save()
+        return Response(out, status=status.HTTP_201_CREATED)
+
+    @swagger_auto_schema(request_body=TicketUploadURLSerializer, tags=["Upload biglietti"])
+    @action(detail=False, methods=["post"], url_path="url")
+    def upload_url(self, request):
+        ser = TicketUploadURLSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        out = ser.save()
+        return Response(out, status=status.HTTP_201_CREATED)
+
+    @swagger_auto_schema(tags=["Upload biglietti"])
+    @action(detail=True, methods=["get"], url_path="review")
+    def review(self, request, pk=None):
+        upload = get_object_or_404(TicketUpload.objects.select_related("biglietto"), pk=pk)
+        if not (request.user.is_staff or upload.seller_id == request.user.id):
+            return Response({"detail": "not allowed"}, status=403)
+        ser = TicketUploadReviewSerializer(upload, context={"request": request})
+        return Response(ser.data, status=200)
+
+    @swagger_auto_schema(request_body=ListingCreateFromUploadSerializer, tags=["Upload biglietti"])
+    @action(detail=True, methods=["post"], url_path="confirm")
+    def confirm(self, request, pk=None):
+        payload = request.data.copy()
+        payload["upload_id"] = pk
+        ser = ListingCreateFromUploadSerializer(data=payload, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        out = ser.save()
+        return Response(out, status=status.HTTP_201_CREATED)
+
+
+class MyResalesView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = MyResaleListItemSerializer
+
+    def get_queryset(self):
+        return (
+            Listing.objects
+            .select_related("performance", "performance__evento", "performance__luogo")
+            .filter(seller=self.request.user)
+            .order_by("-created_at", "-id")
+        )
+
+# =========================
+# ASSISTENZA (Ticket, Messaggi, Allegati)
+# =========================
+
+
+
+class IsOwnerOrStaff(permissions.BasePermission):
+    """
+    Consente sempre allo staff; per gli utenti normali consente solo sui propri ticket/messaggi.
+    """
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_staff:
+            return True
+        # Ticket posseduto?
+        if isinstance(obj, SupportTicket):
+            return getattr(obj, "user_id", None) == user.id
+        # Messaggio/Allegato: risaliamo al ticket
+        if isinstance(obj, SupportMessage):
+            return getattr(obj.ticket, "user_id", None) == user.id or getattr(obj, "author_id", None) == user.id
+        if isinstance(obj, SupportAttachment):
+            return getattr(obj.message.ticket, "user_id", None) == user.id or getattr(obj.message, "author_id", None) == user.id
+        return False
+
+class SupportAttachmentSerializer(ModelSerializer):
+    class Meta:
+        model = SupportAttachment
+        fields = ["id", "file", "uploaded_at", "original_name"]
+
+class SupportMessageSerializer(ModelSerializer):
+    attachments = SupportAttachmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = SupportMessage
+        fields = ["id", "author", "body", "created_at", "is_internal", "attachments"]
+        read_only_fields = ["author", "created_at", "attachments"]
+
+class SupportTicketSerializer(ModelSerializer):
+    messages = SupportMessageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = SupportTicket
+        fields = [
+            "id", "title", "category", "priority", "status",
+            "order", "listing", "biglietto", "ticket_upload",
+            "created_at", "updated_at", "assigned_to", "messages"
+        ]
+        read_only_fields = ["created_at", "updated_at", "assigned_to", "messages"]
+
+class SupportTicketViewSet(viewsets.ModelViewSet):
+    """
+    /api/support/tickets/         [GET list, POST create]
+    /api/support/tickets/{id}/    [GET, PATCH, DELETE]
+    /api/support/tickets/{id}/messages/       [GET, POST]
+    """
+    permission_classes = [permissions.IsAuthenticated, IsOwnerOrStaff]
+    serializer_class = SupportTicketSerializer
+
+    def get_queryset(self):
+        qs = SupportTicket.objects.select_related(
+            "assigned_to", "order", "listing", "biglietto", "ticket_upload"
+        ).all()
+        if getattr(self, "swagger_fake_view", False):
+            return qs.none()
+        if self.request.user.is_staff:
+            return qs.order_by("-created_at", "-pk")
+        return qs.filter(user=self.request.user).order_by("-created_at", "-pk")
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=["get", "post"], url_path="messages")
+    def messages(self, request, pk=None):
+        ticket = self.get_object()  # applica permessi
+        if request.method == "GET":
+            ser = SupportMessageSerializer(ticket.messages.select_related("author").all(), many=True)
+            return Response(ser.data)
+
+        # POST: crea messaggio dell'utente
+        body = (request.data.get("body") or "").strip()
+        if not body:
+            return Response({"body": "required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        msg = SupportMessage.objects.create(ticket=ticket, author=request.user, body=body, is_internal=False)
+
+        # Allegati opzionali (campo "files" o "files[]")
+        files = request.FILES.getlist("files[]") or request.FILES.getlist("files") or []
+        for f in files:
+            SupportAttachment.objects.create(message=msg, file=f, original_name=getattr(f, "name", "") or "")
+
+        return Response(SupportMessageSerializer(msg).data, status=status.HTTP_201_CREATED)
+
+
+class SupportAttachmentUploadView(APIView):
+    """
+    POST /api/support/attachments/
+    body form-data:
+      - message (id del SupportMessage)  OPPURE  - ticket (id del SupportTicket) + body (facoltativo)
+      - file (uno o più)
+    Se fornisci solo ticket, verrà creato un messaggio nuovo dell'utente e attaccati i file.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        message_id = request.data.get("message")
+        ticket_id = request.data.get("ticket")
+
+        files = request.FILES.getlist("file") or request.FILES.getlist("files") or request.FILES.getlist("files[]")
+        if not files:
+            return Response({"detail": "file required"}, status=400)
+
+        if message_id:
+            # allega a messaggio esistente
+            msg = get_object_or_404(SupportMessage.objects.select_related("ticket"), pk=message_id)
+            # permesso: owner o staff
+            perm = IsOwnerOrStaff()
+            if not perm.has_object_permission(request, self, msg):
+                return Response({"detail": "not allowed"}, status=403)
+
+            created = []
+            for f in files:
+                a = SupportAttachment.objects.create(message=msg, file=f, original_name=getattr(f, "name", "") or "")
+                created.append(a)
+            return Response(SupportAttachmentSerializer(created, many=True).data, status=201)
+
+        if ticket_id:
+            # crea un messaggio nuovo su quel ticket e allega i file
+            ticket = get_object_or_404(SupportTicket, pk=ticket_id)
+            perm = IsOwnerOrStaff()
+            if not perm.has_object_permission(request, self, ticket):
+                return Response({"detail": "not allowed"}, status=403)
+
+            body = (request.data.get("body") or "").strip()
+            if not body:
+                body = "Allegati caricati dall'utente"
+
+            msg = SupportMessage.objects.create(ticket=ticket, author=request.user, body=body, is_internal=False)
+
+            created = []
+            for f in files:
+                a = SupportAttachment.objects.create(message=msg, file=f, original_name=getattr(f, "name", "") or "")
+                created.append(a)
+            out = {
+                "message": SupportMessageSerializer(msg).data,
+                "attachments": SupportAttachmentSerializer(created, many=True).data,
+            }
+            return Response(out, status=201)
+
+        return Response({"detail": "provide 'message' or 'ticket' field"}, status=400)

@@ -4,6 +4,7 @@ import re
 from django.utils import timezone
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.conf import settings
 
 
 # =========================
@@ -519,21 +520,41 @@ def biglietto_path(instance, filename):
     return f"uploads/{datetime.now().strftime('%Y/%m')}/{filename}"
 
 
+# --- PATCH: Biglietto ---
 class Biglietto(models.Model):
     nome_file = models.CharField(max_length=255, blank=True, null=True)
     nome_intestatario = models.CharField(max_length=255, blank=True, null=True)
-    sigillo_fiscale = models.CharField(max_length=16, blank=True, null=True)
+
+    # Codici per dedup & ricerche
+    qr_code = models.CharField(
+        max_length=255, blank=True, null=True, db_index=True,
+        help_text="Payload testuale letto dal QR/Barcode"
+    )
+    sigillo_fiscale = models.CharField(max_length=32, blank=True, null=True, db_index=True)
+
+    # Info file
     path_file = models.FileField(upload_to=biglietto_path)
-    hash_file = models.CharField(max_length=64, blank=True, null=True)
     mime_type = models.CharField(max_length=100, blank=True, null=True)
     file_size = models.IntegerField(blank=True, null=True)
+    hash_file = models.CharField(max_length=64, blank=True, null=True, db_index=True)
+
+    # Metadati estratti da PDF
+    pages_count = models.PositiveSmallIntegerField(blank=True, null=True)
+    tickets_found = models.PositiveSmallIntegerField(default=0, help_text="Quanti biglietti distinti trovati nel PDF")
+    extracted_names = models.JSONField(blank=True, null=True, help_text="Lista nominativi trovati (per scelta)")
+    extracted_prices = models.JSONField(blank=True, null=True, help_text="Prezzi letti, se presenti")
+    extracted_meta = models.JSONField(blank=True, null=True, help_text="Altri metadati: settore, fila, posto, ecc.")
+
+    # Collegamenti dedotti
+    evento = models.ForeignKey(Evento, on_delete=models.SET_NULL, null=True, blank=True, related_name="biglietti")
+    performance = models.ForeignKey(Performance, on_delete=models.SET_NULL, null=True, blank=True, related_name="biglietti")
 
     is_valid = models.BooleanField(default=False)
     creato_il = models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.nome_file} ({self.nome_intestatario})" or f"ticket:{self.pk}"
+        return f"{self.nome_file} ({self.nome_intestatario})" if self.nome_file else f"ticket:{self.pk}"
 
     def save(self, *args, **kwargs):
         if not self.nome_file and self.path_file:
@@ -544,20 +565,77 @@ class Biglietto(models.Model):
         super().save(*args, **kwargs)
 
     class Meta:
-        verbose_name="Biglietto"
-        verbose_name_plural="Biglietti"
+        verbose_name = "Biglietto"
+        verbose_name_plural = "Biglietti"
         constraints = [
-            models.UniqueConstraint(fields=["hash_file"], name="uq_ticket_hash", condition=~models.Q(hash_file=None))
+            models.UniqueConstraint(fields=["hash_file"], name="uq_ticket_hash", condition=~models.Q(hash_file=None)),
+            models.UniqueConstraint(fields=["sigillo_fiscale"], name="uq_ticket_sigillo", condition=~models.Q(sigillo_fiscale=None)),
+            models.UniqueConstraint(fields=["qr_code"], name="uq_ticket_qr", condition=~models.Q(qr_code=None)),
+        ]
+        indexes = [
+            models.Index(fields=["qr_code"]),
+            models.Index(fields=["sigillo_fiscale"]),
+            models.Index(fields=["hash_file"]),
         ]
 
 
-class Listing(models.Model):
-    DELIVERY = [("E_TICKET", "E_TICKET"), ("PDF", "PDF"), ("COURIER", "COURIER"), ("APP_TRANSFER", "APP_TRANSFER")]
-    STATUS = [("ACTIVE", "ACTIVE"), ("RESERVED", "RESERVED"), ("SOLD", "SOLD"), ("CANCELLED", "CANCELLED"), ("EXPIRED", "EXPIRED")]
+class TicketSubitem(models.Model):
+    """
+    Un biglietto 'atomico' estratto dal PDF (uno per nominativo/codice).
+    """
+    biglietto = models.ForeignKey(Biglietto, on_delete=models.CASCADE, related_name="subitems")
+    full_name = models.CharField(max_length=255, blank=True, null=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    page = models.IntegerField(blank=True, null=True)
 
+    code_type = models.CharField(max_length=20, blank=True, null=True)   # es: QR/EAN/...
+    code_raw = models.TextField(blank=True, null=True)
+    # models.py (TicketSubitem)
+    # models.py
+    code_hash = models.CharField(max_length=64, unique=True, null=False, blank=False)
+
+    settore = models.CharField(max_length=80, blank=True, null=True)
+    fila = models.CharField(max_length=40, blank=True, null=True)
+    posto = models.CharField(max_length=40, blank=True, null=True)
+
+    is_listed = models.BooleanField(default=False, db_index=True)
+    is_sold = models.BooleanField(default=False, db_index=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Sub-biglietto"
+        verbose_name_plural = "Sub-biglietti"
+
+
+class TicketUpload(models.Model):
+    STATUS = [("PARSING", "PARSING"), ("READY", "READY"), ("ERROR", "ERROR")]
+    seller = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="ticket_uploads")
+    biglietto = models.ForeignKey(Biglietto, on_delete=models.CASCADE, related_name="uploads")
+
+    # se caricato da link remoto
+    source_url = models.URLField(blank=True, null=True)
+    status = models.CharField(max_length=10, choices=STATUS, default="PARSING")
+    found_count = models.IntegerField(default=0)
+    selectable_count = models.IntegerField(default=0)
+    error_message = models.TextField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Upload Biglietto"
+        verbose_name_plural = "Upload Biglietti"
+
+class Listing(models.Model):
+    DELIVERY = [("E_TICKET","E_TICKET"),("PDF","PDF"),("COURIER","COURIER"),("APP_TRANSFER","APP_TRANSFER")]
+    STATUS = [("ACTIVE","ACTIVE"),("RESERVED","RESERVED"),("SOLD","SOLD"),("CANCELLED","CANCELLED"),("EXPIRED","EXPIRED")]
+
+    is_top = models.BooleanField(default=False, db_index=True)
     seller = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="listings")
-    # meglio legare alla performance (data/luogo)
     performance = models.ForeignKey(Performance, on_delete=models.CASCADE, related_name="listings")
+
+    # --- NEW: collego i sub-biglietti selezionati (non il PDF in blocco) ---
 
     seat_category = models.CharField(max_length=80, blank=True, null=True)
     section = models.CharField(max_length=80, blank=True, null=True)
@@ -570,6 +648,9 @@ class Listing(models.Model):
     currency = models.CharField(max_length=3, default="EUR")
     delivery_method = models.CharField(max_length=12, choices=DELIVERY, default="PDF")
 
+    # --- NEW ---
+    change_name_required = models.BooleanField(default=False, help_text="Se richiesto dalla piattaforma/tempi evento")
+
     status = models.CharField(max_length=10, choices=STATUS, default="ACTIVE")
     expires_at = models.DateTimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
@@ -577,18 +658,32 @@ class Listing(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # opzionale: collegare file specifici
-    tickets = models.ManyToManyField(Biglietto, through="ListingTicket", related_name="listings")
+    tickets = models.ManyToManyField(Biglietto, through="ListingTicket", related_name="listings")  # legacy: tienilo se già usato
 
     def __str__(self):
         return f"listing {self.id} perf {self.performance_id} seller {self.seller_id}"
 
     class Meta:
-        verbose_name="Lista"
-        verbose_name_plural="Liste"
+        verbose_name = "Lista"
+        verbose_name_plural = "Liste"
         indexes = [
             models.Index(fields=["performance", "status"]),
             models.Index(fields=["seller"]),
+        ]
+
+
+class ListingSubitem(models.Model):
+    """
+    Collega un Listing ai sub-biglietti pubblicati (quali nominativi stai vendendo).
+    """
+    listing = models.ForeignKey(Listing, on_delete=models.CASCADE, related_name="subitems")
+    subitem = models.ForeignKey(TicketSubitem, on_delete=models.CASCADE, related_name="listings")
+
+    class Meta:
+        verbose_name = "Listing Subitem"
+        verbose_name_plural = "Listing Subitems"
+        constraints = [
+            models.UniqueConstraint(fields=["listing", "subitem"], name="uq_listing_subitem")
         ]
 
 
@@ -654,12 +749,18 @@ class Payment(models.Model):
 
 
 class Rivendita(models.Model):
+    STATUS = [("DRAFT","DRAFT"),("PUBLISHED","PUBLISHED"),("SOLD","SOLD"),("CANCELLED","CANCELLED")]
     evento = models.ForeignKey(Evento, on_delete=models.CASCADE, related_name="rivendite")
     venditore = models.ForeignKey(UserProfile, null=True, on_delete=models.SET_NULL, related_name="rivendite_venditore")
     biglietto = models.ForeignKey(Biglietto, on_delete=models.CASCADE, related_name="rivendite_biglietto")
+    # NEW: subitems coinvolti (di solito coincide con quelli del listing)
+    subitems = models.ManyToManyField(TicketSubitem, blank=True, related_name="rivendite")
+
     url = models.CharField(max_length=1024, blank=True, null=True)
     prezzo = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
     disponibile = models.BooleanField(default=True)
+    status = models.CharField(max_length=12, choices=STATUS, default="DRAFT")
+
     creato_il = models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
 
@@ -670,10 +771,7 @@ class Rivendita(models.Model):
 
     def __str__(self):
         return f"rivendita {self.id} evento {self.evento_id}"
-    
-    class Meta:
-        verbose_name="Rivendita"
-        verbose_name_plural="Rivendite"
+
 
 class Acquisto(models.Model):
     rivendita = models.ForeignKey(Rivendita, on_delete=models.CASCADE, related_name="acquisti")
@@ -689,3 +787,65 @@ class Acquisto(models.Model):
     class Meta:
         verbose_name="Acquisto"
         verbose_name_plural="Acquisti"
+
+
+
+class SupportTicket(models.Model):
+    class Stato(models.TextChoices):
+        OPEN = "OPEN", "Aperto"
+        PENDING = "PENDING", "In attesa"
+        RESOLVED = "RESOLVED", "Risolto"
+        CLOSED = "CLOSED", "Chiuso"
+
+    class Categoria(models.TextChoices):
+        DOWNLOAD = "DOWNLOAD", "Problemi download biglietto"
+        NAMECHANGE = "NAMECHANGE", "Cambio nominativo"
+        PAYMENT = "PAYMENT", "Pagamento"
+        REFUND = "REFUND", "Rimborso"
+        SELLING = "SELLING", "Vendita / Annunci"
+        OTHER = "OTHER", "Altro"
+
+    class Priority(models.TextChoices):
+        LOW = "LOW", "Bassa"
+        NORMAL = "NORMAL", "Normale"
+        HIGH = "HIGH", "Alta"
+        URGENT = "URGENT", "Urgente"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="support_tickets")
+    title = models.CharField(max_length=200)
+    category = models.CharField(max_length=20, choices=Categoria.choices, default=Categoria.OTHER)
+    priority = models.CharField(max_length=10, choices=Priority.choices, default=Priority.NORMAL)
+    status = models.CharField(max_length=10, choices=Stato.choices, default=Stato.OPEN)
+
+    order = models.ForeignKey("api.OrderTicket", null=True, blank=True, on_delete=models.SET_NULL, related_name="support_tickets")
+    listing = models.ForeignKey("api.Listing", null=True, blank=True, on_delete=models.SET_NULL, related_name="support_tickets")
+    biglietto = models.ForeignKey("api.Biglietto", null=True, blank=True, on_delete=models.SET_NULL, related_name="support_tickets")
+    ticket_upload = models.ForeignKey("api.TicketUpload", null=True, blank=True, on_delete=models.SET_NULL, related_name="support_tickets")
+
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    assigned_to = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="assigned_support_tickets")
+
+    def __str__(self):
+        return f"#{self.pk} {self.title} ({self.status})"
+
+
+class SupportMessage(models.Model):
+    ticket = models.ForeignKey(SupportTicket, on_delete=models.CASCADE, related_name="messages")
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="support_messages")
+    body = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now)
+    is_internal = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["created_at", "pk"]
+
+
+def support_upload_path(instance, filename):
+    return f"support/{timezone.now():%Y/%m}/{instance.message.ticket_id}/{filename}"
+
+class SupportAttachment(models.Model):
+    message = models.ForeignKey(SupportMessage, on_delete=models.CASCADE, related_name="attachments")
+    file = models.FileField(upload_to=support_upload_path, max_length=500)
+    uploaded_at = models.DateTimeField(default=timezone.now)
+    original_name = models.CharField(max_length=255, blank=True, default="")
