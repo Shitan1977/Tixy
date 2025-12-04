@@ -104,11 +104,19 @@ WSGI_APPLICATION = 'core.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    "default": {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": "test_tixy",
+        "USER": "test_tixy",
+        "PASSWORD": "!Demetrio1977Adele",
+        "HOST": "95.110.131.98",
+        "PORT": "3306",
+        "OPTIONS": {
+            "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+        },
     }
 }
+
 
 
 # Password validation
@@ -198,8 +206,18 @@ SIMPLE_JWT = {
 #DEFAULT_FROM_EMAIL = 'info@acecrm.it'  # stesso dell'user
 
 # Configurazione email locale – stampa in console
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'info@acecrm.it'
+# === EMAIL / SMTP ARUBA (PRODUZIONE) ====================
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtps.aruba.it"
+EMAIL_PORT = 465
+EMAIL_USE_TLS = False
+EMAIL_USE_SSL = True
+
+EMAIL_HOST_USER = "supporto@tixy.it"
+EMAIL_HOST_PASSWORD = "!Antonio77"
+
+DEFAULT_FROM_EMAIL = "supporto@tixy.it"
+
 
 CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:8000",
@@ -326,6 +344,9 @@ UNFOLD = {
     },
 }
 
+# In sviluppo (DEBUG=True) usa il backend console invece di Aruba
+if DEBUG:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 
 

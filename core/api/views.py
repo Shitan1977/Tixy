@@ -1039,7 +1039,7 @@ class MyPurchasesView(generics.ListAPIView):
     Ordinamento: data evento DESC (poi id DESC)
     """
     permission_classes = [permissions.IsAuthenticated]
-
+    serializer_class = MyPurchasesItemSerializer
     def get_queryset(self):
         # Precarichiamo tutto ciò che serve alla UI
         qs = (
