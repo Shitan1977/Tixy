@@ -153,7 +153,7 @@ USE_TZ = True
 # Static e Media files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
 # Percorso statici per produzione (server Aruba)
 STATIC_ROOT = "/var/www/vhosts/api.tixy.it/httpdocs/static"
 MEDIA_URL = '/media/'
