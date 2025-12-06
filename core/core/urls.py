@@ -25,5 +25,9 @@ urlpatterns = [
 ]
 
 #Per aprire e visualizzare i file caricati con settings.DEBUG = True
+# Media in debug (se ti servono)
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+# Statici (admin + Unfold + DRF + drf-yasg)
+urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
