@@ -42,6 +42,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             "is_active", "is_staff",
             "created_at", "updated_at",
             "password",
+            # Social media
+            "facebook_url", "instagram_url", "tiktok_url", "x_url", "marketing_ok",
         )
 
     def create(self, validated_data):

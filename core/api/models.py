@@ -50,6 +50,13 @@ class UserProfile(AbstractBaseUser, PermissionsMixin):
     date_of_birth = models.DateField(blank=True, null=True, verbose_name="Data di nascita")
     gender = models.CharField(max_length=20, choices=GENDER, default="na", verbose_name="Sesso")
 
+    # Social media profiles
+    facebook_url = models.URLField(max_length=255, blank=True, null=True, verbose_name="Facebook URL")
+    instagram_url = models.URLField(max_length=255, blank=True, null=True, verbose_name="Instagram URL")
+    tiktok_url = models.URLField(max_length=255, blank=True, null=True, verbose_name="TikTok URL")
+    x_url = models.URLField(max_length=255, blank=True, null=True, verbose_name="X (Twitter) URL")
+    marketing_ok = models.BooleanField(default=False, verbose_name="Accetta marketing")
+
     country = models.CharField(max_length=2, blank=True, null=True, verbose_name="Nazione")  # ISO-3166 alpha2
     city = models.CharField(max_length=100, blank=True, null=True, verbose_name="Città")
     address = models.CharField(max_length=255, blank=True, null=True, verbose_name="Indirizzo")
