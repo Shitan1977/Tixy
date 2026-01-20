@@ -281,6 +281,7 @@ class EventFollowSerializer(serializers.ModelSerializer):
     class Meta:
         model = EventFollow
         fields = "__all__"
+        read_only_fields = ["user", "created_at"]
 
 
 # ============ RECENSIONI ============
@@ -566,7 +567,7 @@ class MonitoraggioListSerializer(MonitoraggioSerializer):
 
 
 class EventFollowListSerializer(EventFollowSerializer):
-    evento_info = EventoSerializer(source="evento", read_only=True)
+    evento_info = EventoSerializer(source="event", read_only=True)
 
     class Meta(EventFollowSerializer.Meta):
         # Stesso motivo: il base ha "__all__", quindi lasciamo "__all__"

@@ -610,6 +610,28 @@ class EventFollowViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
+    def create(self, request, *args, **kwargs):
+        """Override per gestire meglio l'errore di unicità."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"EventFollow create - User: {request.user.id}, Data: {request.data}")
+        
+        try:
+            response = super().create(request, *args, **kwargs)
+            logger.info(f"EventFollow created successfully: {response.data}")
+            return response
+        except Exception as e:
+            logger.error(f"EventFollow create error: {type(e).__name__}: {e}")
+            # Gestisce violazione del vincolo unique (già seguito)
+            error_msg = str(e).lower()
+            if "unique" in error_msg or "uq_event_follow" in error_msg:
+                return Response(
+                    {"detail": "Stai già seguendo questo evento"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            raise
+
 
 # ---------------------------
 # MARKETPLACE legacy
