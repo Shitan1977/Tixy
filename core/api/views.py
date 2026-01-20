@@ -137,11 +137,19 @@ class UserProfileViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 
 class UserProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
-    http_method_names = ['get', 'patch', 'put', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'put', 'head', 'options']
 
     def get(self, request):
         serializer = UserProfileSerializer(request.user)
         return Response(serializer.data)
+
+    def post(self, request):
+        """POST per aggiornamento parziale (workaround per server che bloccano PATCH)"""
+        serializer = UserProfileSerializer(request.user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request):
         serializer = UserProfileSerializer(request.user, data=request.data, partial=True)
