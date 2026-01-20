@@ -40,13 +40,14 @@ from .serializers import (
     TicketDownloadSerializer, MarkListingSoldSerializer,
     TicketUploadPDFSerializer, TicketUploadURLSerializer, TicketUploadReviewSerializer,
     ListingCreateFromUploadSerializer, MyResaleListItemSerializer,
+    EventFollowSerializer, EventFollowListSerializer,
 )
 
 from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
     Piattaforma, EventoPiattaforma, Sconti, Abbonamento, Monitoraggio,
     Notifica, Biglietto, Rivendita, Acquisto, Listing, OrderTicket, Recensione,
-    TicketUpload, SupportTicket, SupportMessage, SupportAttachment
+    TicketUpload, SupportTicket, SupportMessage, SupportAttachment, EventFollow
 )
 
 User = get_user_model()
@@ -581,6 +582,33 @@ class NotificaViewSet(SwaggerSafeQuerysetMixin, viewsets.ReadOnlyModelViewSet):
         if self.request.user.is_staff:
             return qs
         return qs.filter(monitoraggio__abbonamento__utente=self.request.user)
+
+
+class EventFollowViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
+    """
+    ViewSet per gli eventi seguiti gratuitamente (EventFollow).
+    Gli utenti possono seguire eventi e ricevere notifiche.
+    """
+    queryset = EventFollow.objects.select_related("user", "event").all()
+    serializer_class = EventFollowSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    filterset_fields = ["event"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs
+        if self.request.user.is_staff:
+            return qs
+        return qs.filter(user=self.request.user)
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return EventFollowListSerializer
+        return EventFollowSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
 
 
 # ---------------------------
