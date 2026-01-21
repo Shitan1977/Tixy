@@ -29,6 +29,10 @@ User = get_user_model()
 
 class UserProfileSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
+    facebook_url = serializers.URLField(required=False, allow_blank=True, allow_null=True)
+    instagram_url = serializers.URLField(required=False, allow_blank=True, allow_null=True)
+    tiktok_url = serializers.URLField(required=False, allow_blank=True, allow_null=True)
+    x_url = serializers.URLField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = User
