@@ -137,7 +137,6 @@ class UserProfileViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 
 class UserProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
-    http_method_names = ['get', 'post', 'patch', 'put', 'head', 'options']
 
     def get(self, request):
         serializer = UserProfileSerializer(request.user)
