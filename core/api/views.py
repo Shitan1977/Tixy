@@ -151,9 +151,12 @@ class UserProfileAPIView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request):
+        print(f"DEBUG BACKEND: Request data: {request.data}")
         serializer = UserProfileSerializer(request.user, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
+            print(f"DEBUG BACKEND: Serializer data: {serializer.data}")
+            print(f"DEBUG BACKEND: User facebook_url: {request.user.facebook_url}")
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
