@@ -1308,15 +1308,38 @@ class SupportMessageSerializer(ModelSerializer):
 
 class SupportTicketSerializer(ModelSerializer):
     messages = SupportMessageSerializer(many=True, read_only=True)
+    # Aggiungi supporto per il campo message in creazione
+    message = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     class Meta:
         model = SupportTicket
         fields = [
             "id", "title", "category", "priority", "status",
             "order", "listing", "biglietto", "ticket_upload",
-            "created_at", "updated_at", "assigned_to", "messages"
+            "created_at", "updated_at", "assigned_to", "messages", "message"
         ]
         read_only_fields = ["created_at", "updated_at", "assigned_to", "messages"]
+
+    def create(self, validated_data):
+        # Estrai il messaggio iniziale se presente
+        message_text = validated_data.pop("message", "").strip()
+        # Rimuovi user dai validated_data perché viene passato da perform_create
+        validated_data.pop("user", None)
+        user = self.context["request"].user
+        
+        # Crea il ticket
+        ticket = SupportTicket.objects.create(user=user, **validated_data)
+        
+        # Crea il primo messaggio se fornito
+        if message_text:
+            SupportMessage.objects.create(
+                ticket=ticket,
+                author=user,
+                body=message_text,
+                is_internal=False
+            )
+        
+        return ticket
 
 class SupportTicketViewSet(viewsets.ModelViewSet):
     """
