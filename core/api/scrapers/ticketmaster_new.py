@@ -72,6 +72,7 @@ class TMWindow:
     end: datetime
 
 
+
 def fetch_events_page(
     *,
     page: int = 0,
@@ -82,6 +83,7 @@ def fetch_events_page(
     include_tba: bool = True,
     include_tbd: bool = True,
     source: Optional[str] = None,
+    keyword: Optional[str] = None,   # ✅ AGGIUNTO
     sort: str = "date,asc",
     timeout: int = 25,
     max_retries_429: int = 6,
@@ -103,6 +105,8 @@ def fetch_events_page(
         params["endDateTime"] = endDateTime
     if source:
         params["source"] = source
+    if keyword:
+        params["keyword"] = keyword   # ✅ AGGIUNTO
 
     for attempt in range(max_retries_429 + 1):
         r = requests.get(TM_BASE, params=params, timeout=timeout)
@@ -114,10 +118,11 @@ def fetch_events_page(
             time.sleep(sleep_s)
             continue
 
-        r.raise_for_status()
+        # se è 400 vogliamo URL+body per capire subito il motivo
         if r.status_code == 400:
             raise TicketmasterError(f"400 Bad Request\nURL: {r.url}\nBODY: {r.text[:600]}")
 
+        r.raise_for_status()
         return r.json()
 
     raise TicketmasterError("Too many 429 responses from Ticketmaster")
@@ -132,13 +137,11 @@ def iter_events_in_window(
     include_tbd: bool = True,
     source: Optional[str] = None,
     hard_page_cap: int = 20_000,
+    debug_window: bool = False,      # ✅ aggiunto
 ) -> Iterator[Dict[str, Any]]:
-    """
-    Itera tutti gli eventi in una finestra temporale.
-    La finestra serve per evitare il limite di deep paging (1000 item).
-    """
     page = 0
     total_pages: Optional[int] = None
+    printed_header = False           # ✅ aggiunto
 
     start_str = iso_z(window.start)
     end_str = iso_z(window.end)
@@ -158,16 +161,27 @@ def iter_events_in_window(
             source=source,
         )
 
+        page_info = data.get("page") or {}
+        total_pages = page_info.get("totalPages")
+        total_elements = page_info.get("totalElements")
+
+        # ✅ stampa una sola volta per finestra
+        if debug_window and not printed_header:
+            printed_header = True
+            approx_max_items = 1000  # deep paging TM
+            approx_pages_limit = max(1, approx_max_items // size)
+            print(
+                f"[TM WINDOW] {start_str} -> {end_str} | "
+                f"totalElements={total_elements} totalPages={total_pages} | "
+                f"size={size} | deepPagingMax~{approx_max_items} (pages~{approx_pages_limit})"
+            )
+
         embedded = data.get("_embedded") or {}
         events = embedded.get("events") or []
 
         for e in events:
             yield e
 
-        page_info = data.get("page") or {}
-        total_pages = page_info.get("totalPages")
-
-        # fallback: se non c’è, esci quando non arrivano risultati
         if total_pages is None and not events:
             break
 
@@ -232,12 +246,13 @@ def iter_all_events_windowed(
 
     for w in windows:
         for e in iter_events_in_window(
-            window=w,
-            country_code=country_code,
-            size=size,
-            include_tba=include_tba,
-            include_tbd=include_tbd,
-            source=source,
+                window=w,
+                country_code=country_code,
+                size=size,
+                include_tba=include_tba,
+                include_tbd=include_tbd,
+                source=source,
+                debug_window=True,  # ✅
         ):
             eid = e.get("id")
             if not eid:
@@ -246,3 +261,37 @@ def iter_all_events_windowed(
                 continue
             seen_ids.add(eid)
             yield e
+
+def probe_windows(
+    *,
+    country_code: str = "IT",
+    months_ahead: int = 18,
+    step_days: int = 14,
+    size: int = 195,
+    include_tba: bool = True,
+    include_tbd: bool = True,
+    source: Optional[str] = None,
+):
+    now = datetime.now(timezone.utc)
+    end_utc = now + timedelta(days=30 * months_ahead)
+    windows = build_windows(start_utc=now, end_utc=end_utc, step_days=step_days)
+
+    for w in windows:
+        start_str = iso_z(w.start)
+        end_str = iso_z(w.end)
+
+        data = fetch_events_page(
+            page=0,
+            size=size,
+            country_code=country_code,
+            startDateTime=start_str,
+            endDateTime=end_str,
+            include_tba=include_tba,
+            include_tbd=include_tbd,
+            source=source,
+        )
+        page_info = data.get("page") or {}
+        total_pages = page_info.get("totalPages")
+        total_elements = page_info.get("totalElements")
+
+        print(f"[TM PROBE] {start_str} -> {end_str} | totalElements={total_elements} totalPages={total_pages} size={size}")
