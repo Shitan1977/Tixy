@@ -543,12 +543,14 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         try:
             tried_db_filter = True
             qs = qs.filter(
-                Q(abbonamento__plan__slug__icontains="pro")
+                Q(abbonamento__plan__name__icontains="pro")
+                | Q(abbonamento__plan__slug__icontains="pro")
                 | Q(abbonamento__plan__nome__icontains="pro")
                 | Q(abbonamento__plan__titolo__icontains="pro")
                 | Q(abbonamento__plan__tipo__iexact="PRO")
                 | Q(abbonamento__plan__livello__iexact="PRO")
             )
+
         except FieldError:
             # Join/lookup non consentite → si va di fallback Python
             qs = qs_base
@@ -560,8 +562,14 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             def is_pro(item):
                 p = getattr(item.abbonamento, "plan", None)
                 if not p:
-                    return False
+                    # fallback: se non c'è plan, consideriamo PRO se l'abbonamento è attivo e il prezzo > 0
+                    try:
+                        prezzo = float(getattr(item.abbonamento, "prezzo", 0) or 0)
+                    except Exception:
+                        prezzo = 0
+                    return bool(getattr(item.abbonamento, "attivo", False)) and prezzo > 0
                 txt = " ".join([
+                    str(getattr(p, "name", "") or ""),
                     str(getattr(p, "slug", "") or ""),
                     str(getattr(p, "nome", "") or ""),
                     str(getattr(p, "titolo", "") or ""),

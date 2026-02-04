@@ -245,11 +245,10 @@ class AlertPlanSerializer(serializers.ModelSerializer):
 
 
 class AbbonamentoSerializer(serializers.ModelSerializer):
-    utente = serializers.PrimaryKeyRelatedField(read_only=True)
+    utente = serializers.HiddenField(default=serializers.CurrentUserDefault())
     utente_info = ShortUserProfileSerializer(source="utente", read_only=True)
     plan_info = AlertPlanSerializer(source="plan", read_only=True)
     sconto_info = ScontiSerializer(source="sconto", read_only=True)
-
     class Meta:
         model = Abbonamento
         fields = "__all__"
@@ -611,22 +610,46 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
             ev = perf.evento
         title = getattr(ev, "nome_evento", None) or getattr(obj, "query", None) or "Evento"
 
-        # Data evento: preferiamo la performance se c’è
+        # Data evento: preferiamo la performance se c’è, altrimenti prima performance dell’evento
         event_date = getattr(perf, "starts_at_utc", None)
+        if not event_date and ev:
+            try:
+                # related_name tipico: performances (o performance_set)
+                qs = getattr(ev, "performances", None)
+                if qs is not None:
+                    first_perf = qs.order_by("starts_at_utc").first()
+                    event_date = getattr(first_perf, "starts_at_utc", None)
+                else:
+                    first_perf = ev.performance_set.order_by("starts_at_utc").first()
+                    event_date = getattr(first_perf, "starts_at_utc", None)
+            except Exception:
+                pass
 
         # Abbonamento / PRO
         ab = getattr(obj, "abbonamento", None)
         activated_at = getattr(ab, "data_inizio", None)
 
         # Scadenza PRO: usa campo diretto se esiste; altrimenti calcolo da plan.periodo_mesi (~30gg/mes)
-        expires = getattr(ab, "expires_at", None)
+        # Scadenza PRO:
+        # 1) campo diretto (se esiste)
+        # 2) data_fine (se presente)
+        # 3) calcolo da plan.periodo_mesi
+        # 4) fallback: 30 giorni da activated_at
+        expires = getattr(ab, "expires_at", None) if ab else None
+
+        if not expires and ab:
+            expires = getattr(ab, "data_fine", None)
+
         if not expires:
             try:
-                mesi = getattr(getattr(ab, "plan", None), "periodo_mesi", None)
+                mesi = getattr(getattr(ab, "plan", None), "periodo_mesi", None) if ab else None
                 if mesi and activated_at:
                     expires = activated_at + timedelta(days=30 * int(mesi))
             except Exception:
                 pass
+
+        if not expires and activated_at:
+            expires = activated_at + timedelta(days=30)
 
         # Stato
         # - closed: evento passato
