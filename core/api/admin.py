@@ -3,6 +3,7 @@ from django.contrib import admin
 from django.utils.html import format_html
 from django.utils.timezone import localtime
 from django import forms
+from django.utils.safestring import mark_safe
 from django.shortcuts import redirect
 from django.urls import reverse_lazy
 from django.utils.translation import gettext_lazy as _
@@ -14,7 +15,7 @@ from .models import (
     Piattaforma, EventoPiattaforma, PerformancePiattaforma, InventorySnapshot,
     Sconti, AlertPlan, Abbonamento, Monitoraggio, Notifica, AlertTrigger, EventFollow,
     Biglietto, Listing, ListingTicket, OrderTicket, Payment,
-    Rivendita, Acquisto, Recensione
+    Rivendita, Acquisto, Recensione, SupportTicket, SupportMessage
 )
 
 # Unfold
@@ -560,3 +561,67 @@ class RecensioneAdmin(ModelAdmin):
     def testo_short(self, obj):
         return shorten(obj.testo, 80)
     testo_short.short_description = "testo"
+
+
+# ============== Support ==============
+
+class SupportMessageInline(TabularInline):
+    model = SupportMessage
+    extra = 0
+    fields = ("author", "body", "created_at", "is_internal")
+    readonly_fields = ("author", "created_at",)
+
+# Form custom per aggiungere risposta al cliente
+class SupportTicketAdminForm(forms.ModelForm):
+    risposta = forms.CharField(
+        label="Risposta al cliente",
+        widget=forms.Textarea(attrs={"rows": 4}),
+        required=False,
+        help_text="Invia una risposta al cliente. Verrà aggiunta come messaggio."
+    )
+
+    class Meta:
+        model = SupportTicket
+        fields = "__all__"
+        model = SupportTicket
+        fields = "__all__"
+
+@admin.register(SupportTicket)
+class SupportTicketAdmin(ModelAdmin):
+    
+    form = SupportTicketAdminForm
+    list_display = ("id", "title", "user", "status", "priority", "category", "created_at", "updated_at")
+    list_display_links = ("id", "title")  
+    list_filter = ("status", "priority", "category")
+    search_fields = ("title", "user__email", "id")
+    inlines = [SupportMessageInline]
+    readonly_fields = ("created_at", "updated_at")
+    actions = ["mark_closed"]
+
+    def save_model(self, request, obj, form, change):
+        # Salva la risposta come nuovo messaggio se presente
+        risposta = form.cleaned_data.get("risposta")
+        if risposta:
+            SupportMessage.objects.create(
+                ticket=obj,
+                author=request.user,
+                body=risposta,
+                is_internal=False
+            )
+        super().save_model(request, obj, form, change)
+
+    def save_formset(self, request, form, formset, change):
+        instances = formset.save(commit=False)
+        for obj in instances:
+            if not obj.pk:
+                # Only save if the message has a body
+                if getattr(obj, "body", None):
+                    obj.author = request.user
+                    obj.save()
+            else:
+                obj.save()
+        formset.save_m2m()
+
+    def mark_closed(self, request, queryset):
+        queryset.update(status="CLOSED")
+    mark_closed.short_description = "Chiudi i ticket selezionati"

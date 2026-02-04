@@ -226,7 +226,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8000",
     "https://tixy.it",
     "https://www.tixy.it",
-    "https://api.tixy.it",
+    
 ]
 
 CORS_ALLOW_METHODS = [
@@ -333,6 +333,18 @@ UNFOLD = {
                     {"title": _("Sconti"), 
                      "icon":"percent",
                      "link": reverse_lazy("admin:api_sconti_changelist")},
+                ],
+            },
+            {
+                "title": _("Assistenza"),
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": _("Ticket di supporto"),
+                        "icon": "support_agent",
+                        "link": reverse_lazy("admin:api_supportticket_changelist"),
+                    },
                 ],
             },
         ],

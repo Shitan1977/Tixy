@@ -245,6 +245,7 @@ class AlertPlanSerializer(serializers.ModelSerializer):
 
 
 class AbbonamentoSerializer(serializers.ModelSerializer):
+    utente = serializers.PrimaryKeyRelatedField(read_only=True)
     utente_info = ShortUserProfileSerializer(source="utente", read_only=True)
     plan_info = AlertPlanSerializer(source="plan", read_only=True)
     sconto_info = ScontiSerializer(source="sconto", read_only=True)
@@ -252,7 +253,7 @@ class AbbonamentoSerializer(serializers.ModelSerializer):
     class Meta:
         model = Abbonamento
         fields = "__all__"
-        read_only_fields = ("data_inizio",)
+        read_only_fields = ("data_inizio", "utente",)  # <-- assicurati che "utente" sia qui
 
 
 class MonitoraggioSerializer(serializers.ModelSerializer):

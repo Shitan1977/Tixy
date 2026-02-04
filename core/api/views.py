@@ -463,6 +463,10 @@ class AbbonamentoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             return qs
         return qs.filter(utente=self.request.user)
 
+    def perform_create(self, serializer):
+        # Imposta sempre l'utente autenticato
+        serializer.save(utente=self.request.user)
+
 
 class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     queryset = Monitoraggio.objects.select_related("abbonamento", "evento", "performance").all()
@@ -1381,7 +1385,6 @@ class SupportTicketViewSet(viewsets.ModelViewSet):
         files = request.FILES.getlist("files[]") or request.FILES.getlist("files") or []
         for f in files:
             SupportAttachment.objects.create(message=msg, file=f, original_name=getattr(f, "name", "") or "")
-
         return Response(SupportMessageSerializer(msg).data, status=status.HTTP_201_CREATED)
 
 
