@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import time
 from typing import Optional
-
+import random
+import requests
 from django.conf import settings
 from django.core.mail import send_mail
 from django.core.management.base import BaseCommand
@@ -113,6 +114,14 @@ class Command(BaseCommand):
         verbose = opts["verbose"]
 
         now = timezone.now()
+        # --- Ticketmaster: sessione riusata (cookie/keep-alive) + jitter ---
+        tm_session = requests.Session()
+
+        def snooze(base: float, *, heavy: bool = False) -> None:
+            # jitter per evitare pattern fisso
+            j = random.uniform(0.2, 0.9)
+            extra = random.uniform(2.0, 6.0) if heavy else 0.0
+            time.sleep(max(0.0, base + j + extra))
 
         # Monitoraggi legati a piani a pagamento (plan presente e price>0)
         qs = (
@@ -181,14 +190,22 @@ class Command(BaseCommand):
                 continue
 
             # Scan Ticketmaster
-            res = check_ticketmaster_page_availability(url=tm_url)
+            res = check_ticketmaster_page_availability(url=tm_url, session=tm_session)
+
 
             # se ok=False è un errore di fetch (timeout, block, ecc)
             if not res.get("ok"):
                 skipped_tm_error += 1
+                sc = res.get("status_code")
                 if verbose:
-                    self.stdout.write(f"[TM ERR] perf {perf.id} {tm_url} => {res.get('reason')} (status={res.get('status_code')})")
-                time.sleep(sleep_s)
+                    self.stdout.write(f"[TM ERR] perf {perf.id} {tm_url} => {res.get('reason')} (status={sc})")
+
+                # se 403/429: cooldown più lungo per non farti bloccare peggio
+                if sc in (403, 429):
+                    snooze(sleep_s, heavy=True)
+                else:
+                    snooze(sleep_s)
+
                 continue
 
             availability = res.get("availability")
@@ -196,7 +213,7 @@ class Command(BaseCommand):
                 skipped_not_available += 1
                 if verbose:
                     self.stdout.write(f"[TM] perf {perf.id} => {availability} ({res.get('reason')})")
-                time.sleep(sleep_s)
+                snooze(sleep_s)
                 continue
 
             # Dedupe: 1 notifica al giorno
@@ -206,7 +223,7 @@ class Command(BaseCommand):
                 skipped_deduped += 1
                 if verbose:
                     self.stdout.write(f"[DEDUP] perf {perf.id} già notificata oggi")
-                time.sleep(sleep_s)
+                snooze(sleep_s)
                 continue
 
             # Messaggio email
@@ -228,7 +245,7 @@ class Command(BaseCommand):
             if dry_run:
                 self.stdout.write(f"[DRY] NOTIFY user={user.email} perf={perf.id} url={tm_url}")
                 notified += 1
-                time.sleep(sleep_s)
+                snooze(sleep_s)
                 continue
 
             # Salvo Notifica prima di inviare (dedupe)
@@ -260,7 +277,7 @@ class Command(BaseCommand):
                 self.stdout.write(f"[NO EMAIL PREF] user={user.email}")
 
             notified += 1
-            time.sleep(sleep_s)
+            snooze(sleep_s)
 
         self.stdout.write(
             f"[DONE] processed={done} notified={notified} "

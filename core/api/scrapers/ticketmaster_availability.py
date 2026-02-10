@@ -239,47 +239,161 @@ from typing import Literal, Optional, Dict, Any
 
 Availability = Literal["available", "unavailable", "unknown"]
 
-def check_ticketmaster_page_availability(*, url: str, timeout: int = 20) -> Dict[str, Any]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "it-IT,it;q=0.9,en;q=0.7",
-        "Referer": "https://www.ticketmaster.it/",
+from typing import Any, Dict, Optional
+import time
+import random
+import requests
+
+
+def check_ticketmaster_page_availability(
+    *,
+    url: str,
+    timeout: int = 20,
+    session: Optional[requests.Session] = None,
+    max_retries: int = 3,
+) -> Dict[str, Any]:
+    """
+    Fetch HTML pagina Ticketmaster e prova a dedurre availability.
+
+    Obiettivi:
+    - ridurre 403/429 con sessione persistente + retry con backoff
+    - non esplodere: ritorna sempre dict standard
+    """
+
+    s = session or requests.Session()
+
+    ua_pool = [
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    ]
+
+    def build_headers(attempt: int) -> Dict[str, str]:
+        ua = ua_pool[attempt % len(ua_pool)]
+        return {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://www.ticketmaster.it/",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        }
+
+    # keyword (lowercase match)
+    negatives = [
+        "sold out",
+        "esaurito",
+        "non disponibile",
+        "tickets not available",
+        "no tickets available",
+    ]
+    positives = [
+        "acquista",
+        "buy tickets",
+        "aggiungi al carrello",
+        "on sale",
+        "in vendita",
+    ]
+
+    last_exc: Optional[str] = None
+    last_status: Optional[int] = None
+    last_final_url: Optional[str] = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            r = s.get(
+                url,
+                headers=build_headers(attempt),
+                timeout=timeout,
+                allow_redirects=True,
+            )
+            last_status = r.status_code
+            last_final_url = r.url
+
+            # 404: link non valido / evento rimosso / routing TM
+            if r.status_code == 404:
+                return {
+                    "ok": True,
+                    "availability": "unknown",
+                    "status_code": 404,
+                    "final_url": last_final_url,
+                    "reason": "page_404_invalid_url",
+                }
+
+            # transitori: ritenta con backoff
+            if r.status_code in (403, 429) or (500 <= r.status_code <= 599):
+                if attempt < max_retries:
+                    sleep_s = (2 ** attempt) + random.uniform(0.2, 0.8)
+                    time.sleep(sleep_s)
+                    continue
+                return {
+                    "ok": False,
+                    "availability": "unknown",
+                    "status_code": r.status_code,
+                    "final_url": last_final_url,
+                    "reason": f"HTTP {r.status_code} (blocked/rate/5xx)",
+                }
+
+            # altre 4xx: errore “definitivo”
+            if r.status_code >= 400:
+                return {
+                    "ok": False,
+                    "availability": "unknown",
+                    "status_code": r.status_code,
+                    "final_url": last_final_url,
+                    "reason": f"HTTP {r.status_code}",
+                }
+
+            text = (r.text or "").lower()
+
+            if any(k in text for k in negatives):
+                return {
+                    "ok": True,
+                    "availability": "unavailable",
+                    "status_code": r.status_code,
+                    "final_url": last_final_url,
+                    "reason": "negative_keyword",
+                }
+
+            if any(k in text for k in positives):
+                return {
+                    "ok": True,
+                    "availability": "available",
+                    "status_code": r.status_code,
+                    "final_url": last_final_url,
+                    "reason": "positive_keyword",
+                }
+
+            return {
+                "ok": True,
+                "availability": "unknown",
+                "status_code": r.status_code,
+                "final_url": last_final_url,
+                "reason": "no_strong_signals",
+            }
+
+        except Exception as ex:
+            last_exc = str(ex)
+            if attempt < max_retries:
+                sleep_s = (2 ** attempt) + random.uniform(0.2, 0.8)
+                time.sleep(sleep_s)
+                continue
+            return {
+                "ok": False,
+                "availability": "unknown",
+                "status_code": last_status,
+                "final_url": last_final_url,
+                "reason": f"exception: {last_exc}",
+            }
+
+    # non dovrebbe mai arrivare qui
+    return {
+        "ok": False,
+        "availability": "unknown",
+        "status_code": last_status,
+        "final_url": last_final_url,
+        "reason": "unexpected_fallthrough",
     }
-
-    try:
-        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-    except Exception as ex:
-        return {"ok": False, "availability": "unknown", "status_code": None, "final_url": None, "reason": str(ex)}
-
-    status = r.status_code
-    final_url = r.url
-    text = (r.text or "").lower()
-
-    # 404 = URL non valido (capita spesso nei nostri dati)
-    if status == 404:
-        return {"ok": True, "availability": "unknown", "status_code": 404, "final_url": final_url, "reason": "page_404_invalid_url"}
-
-    if status in (401, 403, 429):
-        return {"ok": False, "availability": "unknown", "status_code": status, "final_url": final_url, "reason": f"HTTP {status} (probabile anti-bot)"}
-
-    if status >= 400:
-        return {"ok": False, "availability": "unknown", "status_code": status, "final_url": final_url, "reason": f"HTTP {status}"}
-
-    negatives = ["sold out", "esaurito", "non disponibile", "tickets not available", "no tickets available"]
-    positives = ["acquista", "buy tickets", "aggiungi al carrello", "on sale", "in vendita"]
-
-    if any(k in text for k in negatives):
-        return {"ok": True, "availability": "unavailable", "status_code": status, "final_url": final_url, "reason": "negative_keyword"}
-
-    if any(k in text for k in positives):
-        return {"ok": True, "availability": "available", "status_code": status, "final_url": final_url, "reason": "positive_keyword"}
-
-    # fallback: se pagina 200 ma non capiamo, lasciamo unknown
-    return {"ok": True, "availability": "unknown", "status_code": status, "final_url": final_url, "reason": "no_strong_signals"}
-
-
 def check_ticketmaster_mapping_availability(*, tm_id: str, url: str) -> Dict[str, Any]:
     """
     Wrapper: normalizza output e aggiunge flags utili al job.
