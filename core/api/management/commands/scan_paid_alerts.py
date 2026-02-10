@@ -84,12 +84,13 @@ def _has_internal_tickets(perf: Performance) -> bool:
     return False
 
 
-def _dedupe_key(perf_id: int, platform: str, reason: str) -> str:
+def _dedupe_key(perf_id: int, user_id: int, platform: str, reason: str) -> str:
     """
-    1 notifica al giorno per performance + reason + platform.
+    1 notifica al giorno per performance + user + reason + platform.
     """
     day = timezone.now().date().isoformat()
-    return f"{platform}:{reason}:perf:{perf_id}:{day}"
+    return f"{platform}:{reason}:perf:{perf_id}:user:{user_id}:{day}"
+
 
 
 # -------------------------
@@ -118,8 +119,7 @@ class Command(BaseCommand):
             Monitoraggio.objects
             .filter(
                 abbonamento__attivo=True,
-                abbonamento__plan__isnull=False,
-                abbonamento__plan__price__gt=0,
+                abbonamento__prezzo__gt=0,
             )
             .filter(Q(abbonamento__data_fine__isnull=True) | Q(abbonamento__data_fine__gte=now))
             .select_related(
@@ -200,7 +200,8 @@ class Command(BaseCommand):
                 continue
 
             # Dedupe: 1 notifica al giorno
-            dk = _dedupe_key(perf.id, "ticketmaster", "BACK_IN_STOCK")
+            dk = _dedupe_key(perf.id, user.id, "ticketmaster", "BACK_IN_STOCK")
+
             if Notifica.objects.filter(dedupe_key=dk).exists():
                 skipped_deduped += 1
                 if verbose:
