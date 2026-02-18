@@ -258,6 +258,7 @@ class Command(BaseCommand):
             )
 
             # Invio email se consentito
+            # Invio email; salvo Notifica SOLO dopo successo (dedupe)
             if getattr(user, "notify_email", True):
                 try:
                     send_mail(
@@ -268,10 +269,16 @@ class Command(BaseCommand):
                         fail_silently=False,
                     )
                 except Exception as e:
-                    notif.status = "FAILED"
-                    notif.save(update_fields=["status"])
                     self.stdout.write(f"[EMAIL FAIL] {user.email}: {e}")
                 else:
+                    Notifica.objects.create(
+                        monitoraggio=m,
+                        channel="email",
+                        dedupe_key=dk,
+                        status="SENT",
+                        sent_at=now,
+                        message=msg,
+                    )
                     self.stdout.write(f"[EMAIL OK] {user.email} perf={perf.id}")
             else:
                 self.stdout.write(f"[NO EMAIL PREF] user={user.email}")
