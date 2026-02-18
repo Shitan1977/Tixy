@@ -248,14 +248,6 @@ class Command(BaseCommand):
                 snooze(sleep_s)
                 continue
 
-            # Salvo Notifica prima di inviare (dedupe)
-            notif = Notifica.objects.create(
-                monitoraggio=m,
-                channel="email",
-                dedupe_key=dk,
-                status="SENT",  # la correggiamo a FAILED se l’email fallisce
-                message=msg,
-            )
 
             # Invio email se consentito
             # Invio email; salvo Notifica SOLO dopo successo (dedupe)
