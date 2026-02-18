@@ -1,12 +1,15 @@
+# api/management/commands/scan_ticketmaster_pro.py
 from __future__ import annotations
 
-import time
-from typing import Optional
 import random
+import time
+from typing import Optional, Tuple
+
 import requests
 from django.conf import settings
 from django.core.mail import send_mail
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -29,55 +32,15 @@ from api.scrapers.ticketmaster_availability import check_ticketmaster_page_avail
 # -------------------------
 
 def _abbonamento_is_active(ab: Abbonamento) -> bool:
-    """
-    Un abbonamento è attivo se:
-    - attivo=True
-    - data_fine è None oppure >= now
-    """
-    if not ab.attivo:
+    if not getattr(ab, "attivo", False):
         return False
-    if ab.data_fine and ab.data_fine < timezone.now():
+    data_fine = getattr(ab, "data_fine", None)
+    if data_fine and data_fine < timezone.now():
         return False
     return True
 
 
-def _get_ticketmaster_url_for_performance(perf: Performance) -> Optional[str]:
-    """
-    Recupera la URL Ticketmaster per una performance.
-
-    Strategia:
-    1) prova PerformancePiattaforma (se in futuro lo popoli)
-    2) fallback EventoPiattaforma (quello che hai davvero oggi)
-    """
-    pp = (
-        PerformancePiattaforma.objects
-        .filter(performance=perf, piattaforma__nome="ticketmaster")
-        .exclude(url="")
-        .order_by("-aggiornato_il")
-        .first()
-    )
-    if pp and pp.url:
-        return pp.url
-
-    ep = (
-        EventoPiattaforma.objects
-        .filter(evento=perf.evento, piattaforma__nome="ticketmaster")
-        .exclude(url="")
-        .order_by("-aggiornato_il")
-        .first()
-    )
-    if ep and ep.url:
-        return ep.url
-
-    return None
-
-
 def _has_internal_tickets(perf: Performance) -> bool:
-    """
-    Se abbiamo già biglietti interni per quella performance, non ha senso avvisare.
-    - Biglietto validi in DB
-    - oppure Listing attivi in marketplace
-    """
     if Biglietto.objects.filter(performance=perf, is_valid=True).exists():
         return True
     if Listing.objects.filter(performance=perf, status="ACTIVE").exists():
@@ -86,12 +49,77 @@ def _has_internal_tickets(perf: Performance) -> bool:
 
 
 def _dedupe_key(perf_id: int, user_id: int, platform: str, reason: str) -> str:
-    """
-    1 notifica al giorno per performance + user + reason + platform.
-    """
     day = timezone.now().date().isoformat()
     return f"{platform}:{reason}:perf:{perf_id}:user:{user_id}:{day}"
 
+
+def _get_ticketmaster_mapping_for_performance(perf: Performance) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+    """
+    Ritorna: (url, mapping_type, mapping_pk)
+    mapping_type: "performance" | "evento" | None
+    """
+    pp = (
+        PerformancePiattaforma.objects
+        .filter(performance=perf, piattaforma__nome__iexact="ticketmaster")
+        .exclude(url="")
+        .order_by("-aggiornato_il")
+        .first()
+    )
+    if pp and pp.url:
+        return pp.url, "performance", pp.pk
+
+    ep = (
+        EventoPiattaforma.objects
+        .filter(evento=perf.evento, piattaforma__nome__iexact="ticketmaster")
+        .exclude(url="")
+        .order_by("-aggiornato_il")
+        .first()
+    )
+    if ep and ep.url:
+        return ep.url, "evento", ep.pk
+
+    return None, None, None
+
+
+def _touch_last_scan(mapping_type: Optional[str], mapping_pk: Optional[int]) -> None:
+    """Aggiorna ultima_scansione sul mapping usato."""
+    if not mapping_type or not mapping_pk:
+        return
+    now = timezone.now()
+    if mapping_type == "performance":
+        PerformancePiattaforma.objects.filter(pk=mapping_pk).update(ultima_scansione=now)
+    elif mapping_type == "evento":
+        EventoPiattaforma.objects.filter(pk=mapping_pk).update(ultima_scansione=now)
+
+
+def _sleep_with_jitter(base: float, *, heavy: bool = False) -> None:
+    j = random.uniform(0.15, 0.85)
+    extra = random.uniform(2.0, 6.0) if heavy else 0.0
+    time.sleep(max(0.0, base + j + extra))
+
+
+def _send_email_with_retry(*, subject: str, message: str, to_email: str, max_retries: int, base_wait: float) -> Tuple[bool, str]:
+    """
+    Riprova l'invio email con backoff.
+    Ritorna: (ok, last_error)
+    """
+    last_err = ""
+    for attempt in range(1, max_retries + 1):
+        try:
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+                recipient_list=[to_email],
+                fail_silently=False,
+            )
+            return True, ""
+        except Exception as e:
+            last_err = str(e)
+            # backoff crescente (attempt 1 -> base_wait, attempt 2 -> 2*base_wait, ...)
+            wait = base_wait * attempt
+            time.sleep(wait)
+    return False, last_err
 
 
 # -------------------------
@@ -99,31 +127,35 @@ def _dedupe_key(perf_id: int, user_id: int, platform: str, reason: str) -> str:
 # -------------------------
 
 class Command(BaseCommand):
-    help = "Scansiona monitoraggi PRO (abbonamenti attivi) e invia email quando Ticketmaster torna disponibile."
+    help = "Scansiona monitoraggi PRO attivi e invia email quando Ticketmaster torna disponibile."
 
     def add_arguments(self, parser):
-        parser.add_argument("--limit", type=int, default=100, help="Quanti monitoraggi massimo processare.")
-        parser.add_argument("--sleep", type=float, default=0.4, help="Sleep tra chiamate esterne (anti-ban).")
+        parser.add_argument("--limit", type=int, default=200, help="Quanti monitoraggi massimo processare.")
+        parser.add_argument("--sleep", type=float, default=0.35, help="Pausa base tra chiamate esterne (anti-ban).")
         parser.add_argument("--dry-run", action="store_true", help="Non invia email e non salva Notifica.")
         parser.add_argument("--verbose", action="store_true", help="Log più dettagliato.")
 
+        parser.add_argument("--email-retries", type=int, default=3, help="Quanti tentativi per inviare email.")
+        parser.add_argument("--email-wait", type=float, default=1.5, help="Attesa base tra tentativi email (backoff).")
+
     def handle(self, *args, **opts):
-        limit = opts["limit"]
-        sleep_s = opts["sleep"]
-        dry_run = opts["dry_run"]
-        verbose = opts["verbose"]
+        limit = int(opts["limit"])
+        sleep_s = float(opts["sleep"])
+        dry_run = bool(opts["dry_run"])
+        verbose = bool(opts["verbose"])
+        email_retries = max(1, int(opts["email_retries"]))
+        email_wait = max(0.5, float(opts["email_wait"]))
 
         now = timezone.now()
-        # --- Ticketmaster: sessione riusata (cookie/keep-alive) + jitter ---
+
+        # Sessione HTTP riusata
         tm_session = requests.Session()
+        tm_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari",
+            "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+        })
 
-        def snooze(base: float, *, heavy: bool = False) -> None:
-            # jitter per evitare pattern fisso
-            j = random.uniform(0.2, 0.9)
-            extra = random.uniform(2.0, 6.0) if heavy else 0.0
-            time.sleep(max(0.0, base + j + extra))
-
-        # Monitoraggi legati a piani a pagamento (plan presente e price>0)
+        # Query monitoraggi PRO attivi
         qs = (
             Monitoraggio.objects
             .filter(
@@ -138,149 +170,182 @@ class Command(BaseCommand):
                 "performance__evento",
                 "performance__luogo",
             )
+            .order_by("id")
         )
 
         if verbose:
-            self.stdout.write(f"[DEBUG] now={now}")
-            self.stdout.write(f"[DEBUG] monitoraggi_qs_count={qs.count()}")
+            self.stdout.write(f"[DEBUG] now={now.isoformat()} qs_count={qs.count()}")
 
-        # filtro python extra con helper (ridondante ma sicuro)
+        # Filtro extra python (sicuro) + limite
         monitoraggi = []
         for m in qs[: limit * 5]:
-            if _abbonamento_is_active(m.abbonamento):
-                monitoraggi.append(m)
+            try:
+                if _abbonamento_is_active(m.abbonamento):
+                    monitoraggi.append(m)
+            except Exception:
+                # se qualche record è corrotto, non blocchiamo
+                continue
             if len(monitoraggi) >= limit:
                 break
 
-        self.stdout.write(f"[SCAN] monitoraggi attivi trovati: {len(monitoraggi)} (limit={limit})")
+        self.stdout.write(f"[SCAN] monitoraggi PRO attivi: {len(monitoraggi)} (limit={limit})")
 
-        done = 0
-        notified = 0
-        skipped_no_perf = 0
-        skipped_has_internal = 0
-        skipped_no_mapping = 0
-        skipped_not_available = 0
-        skipped_deduped = 0
-        skipped_tm_error = 0
+        counters = {
+            "processed": 0,
+            "notified": 0,
+            "skip_no_perf": 0,
+            "skip_internal": 0,
+            "skip_no_mapping": 0,
+            "skip_not_avail": 0,
+            "skip_dedup": 0,
+            "tm_error": 0,
+            "email_fail": 0,
+            "no_email_pref": 0,
+        }
 
         for m in monitoraggi:
-            done += 1
-            user = m.abbonamento.utente
+            counters["processed"] += 1
 
-            perf = m.performance
-            if perf is None:
-                skipped_no_perf += 1
-                if verbose:
-                    self.stdout.write(f"[SKIP] monitoraggio {m.id}: nessuna performance (evento-only)")
-                continue
+            # isoliamo ogni monitoraggio: se uno esplode non ferma il job
+            try:
+                user = m.abbonamento.utente
+                perf = m.performance
+                if perf is None:
+                    counters["skip_no_perf"] += 1
+                    if verbose:
+                        self.stdout.write(f"[SKIP] monitoraggio {m.id}: performance mancante")
+                    continue
 
-            # Se abbiamo già biglietti interni, non avvisiamo
-            if _has_internal_tickets(perf):
-                skipped_has_internal += 1
-                if verbose:
-                    self.stdout.write(f"[SKIP] perf {perf.id}: già biglietti nel DB/listing (no alert)")
-                continue
+                # se già abbiamo biglietti interni: niente alert
+                if _has_internal_tickets(perf):
+                    counters["skip_internal"] += 1
+                    if verbose:
+                        self.stdout.write(f"[SKIP] perf {perf.id}: biglietti già presenti (DB/listing)")
+                    continue
 
-            # URL ticketmaster (perf->evento fallback)
-            tm_url = _get_ticketmaster_url_for_performance(perf)
-            if not tm_url:
-                skipped_no_mapping += 1
-                if verbose:
-                    self.stdout.write(f"[SKIP] perf {perf.id}: nessun mapping Ticketmaster url")
-                continue
+                # mapping Ticketmaster (performance -> fallback evento)
+                tm_url, mapping_type, mapping_pk = _get_ticketmaster_mapping_for_performance(perf)
+                if not tm_url:
+                    counters["skip_no_mapping"] += 1
+                    if verbose:
+                        self.stdout.write(f"[SKIP] perf {perf.id}: mapping TM assente")
+                    continue
 
-            # Scan Ticketmaster
-            res = check_ticketmaster_page_availability(url=tm_url, session=tm_session)
-
-
-            # se ok=False è un errore di fetch (timeout, block, ecc)
-            if not res.get("ok"):
-                skipped_tm_error += 1
-                sc = res.get("status_code")
-                if verbose:
-                    self.stdout.write(f"[TM ERR] perf {perf.id} {tm_url} => {res.get('reason')} (status={sc})")
-
-                # se 403/429: cooldown più lungo per non farti bloccare peggio
-                if sc in (403, 429):
-                    snooze(sleep_s, heavy=True)
-                else:
-                    snooze(sleep_s)
-
-                continue
-
-            availability = res.get("availability")
-            if availability != "available":
-                skipped_not_available += 1
-                if verbose:
-                    self.stdout.write(f"[TM] perf {perf.id} => {availability} ({res.get('reason')})")
-                snooze(sleep_s)
-                continue
-
-            # Dedupe: 1 notifica al giorno
-            dk = _dedupe_key(perf.id, user.id, "ticketmaster", "BACK_IN_STOCK")
-
-            if Notifica.objects.filter(dedupe_key=dk).exists():
-                skipped_deduped += 1
-                if verbose:
-                    self.stdout.write(f"[DEDUP] perf {perf.id} già notificata oggi")
-                snooze(sleep_s)
-                continue
-
-            # Messaggio email
-            event_title = perf.evento.nome_evento if perf.evento_id else "Evento"
-            luogo = getattr(perf.luogo, "nome", "") if getattr(perf, "luogo_id", None) else ""
-            when = perf.starts_at_utc.isoformat() if perf.starts_at_utc else "—"
-
-            subject = f"Biglietti disponibili: {event_title}"
-            msg = (
-                f"Ciao {user.first_name},\n\n"
-                f"Sono tornati disponibili biglietti su Ticketmaster per:\n"
-                f"- Evento: {event_title}\n"
-                f"- Luogo: {luogo}\n"
-                f"- Data: {when}\n\n"
-                f"Link: {tm_url}\n\n"
-                f"— Tixy"
-            )
-
-            if dry_run:
-                self.stdout.write(f"[DRY] NOTIFY user={user.email} perf={perf.id} url={tm_url}")
-                notified += 1
-                snooze(sleep_s)
-                continue
-
-
-            # Invio email se consentito
-            # Invio email; salvo Notifica SOLO dopo successo (dedupe)
-            if getattr(user, "notify_email", True):
+                # scan Ticketmaster
                 try:
-                    send_mail(
-                        subject=subject,
-                        message=msg,
-                        from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                        recipient_list=[user.email],
-                        fail_silently=False,
-                    )
-                except Exception as e:
-                    self.stdout.write(f"[EMAIL FAIL] {user.email}: {e}")
-                else:
+                    res = check_ticketmaster_page_availability(url=tm_url, session=tm_session)
+                except Exception as ex:
+                    counters["tm_error"] += 1
+                    if verbose:
+                        self.stdout.write(f"[TM EXC] perf {perf.id} url={tm_url} err={ex}")
+                    _touch_last_scan(mapping_type, mapping_pk)
+                    _sleep_with_jitter(sleep_s, heavy=True)
+                    continue
+
+                # aggiorniamo SEMPRE ultima_scansione del mapping usato
+                _touch_last_scan(mapping_type, mapping_pk)
+
+                if not res.get("ok"):
+                    counters["tm_error"] += 1
+                    sc = res.get("status_code")
+                    if verbose:
+                        self.stdout.write(f"[TM ERR] perf {perf.id} status={sc} reason={res.get('reason')}")
+                    if sc in (403, 429):
+                        _sleep_with_jitter(sleep_s, heavy=True)
+                    else:
+                        _sleep_with_jitter(sleep_s)
+                    continue
+
+                availability = res.get("availability")
+                if availability != "available":
+                    counters["skip_not_avail"] += 1
+                    if verbose:
+                        self.stdout.write(f"[TM] perf {perf.id} => {availability} ({res.get('reason')})")
+                    _sleep_with_jitter(sleep_s)
+                    continue
+
+                # dedupe SOLO su notifiche SENT
+                dk = _dedupe_key(perf.id, user.id, "ticketmaster", "BACK_IN_STOCK")
+                if Notifica.objects.filter(dedupe_key=dk, status="SENT").exists():
+                    counters["skip_dedup"] += 1
+                    if verbose:
+                        self.stdout.write(f"[DEDUP] perf {perf.id} già notificata oggi (SENT)")
+                    _sleep_with_jitter(sleep_s)
+                    continue
+
+                # preferenze email utente
+                if not getattr(user, "notify_email", True):
+                    counters["no_email_pref"] += 1
+                    if verbose:
+                        self.stdout.write(f"[NO EMAIL PREF] user={getattr(user,'email',None)}")
+                    _sleep_with_jitter(sleep_s)
+                    continue
+
+                # email content
+                event_title = perf.evento.nome_evento if getattr(perf, "evento_id", None) else "Evento"
+                luogo = getattr(perf.luogo, "nome", "") if getattr(perf, "luogo_id", None) else ""
+                when = perf.starts_at_utc.isoformat() if getattr(perf, "starts_at_utc", None) else "—"
+
+                subject = f"Biglietti disponibili: {event_title}"
+                msg = (
+                    f"Ciao {getattr(user,'first_name','')},\n\n"
+                    f"Sono tornati disponibili biglietti su Ticketmaster per:\n"
+                    f"- Evento: {event_title}\n"
+                    f"- Luogo: {luogo}\n"
+                    f"- Data: {when}\n\n"
+                    f"Link: {tm_url}\n\n"
+                    f"— Tixy"
+                )
+
+                if dry_run:
+                    self.stdout.write(f"[DRY] WOULD EMAIL user={user.email} perf={perf.id} url={tm_url}")
+                    counters["notified"] += 1
+                    _sleep_with_jitter(sleep_s)
+                    continue
+
+                # invio email + retry, e SALVO Notifica solo se OK
+                ok, err = _send_email_with_retry(
+                    subject=subject,
+                    message=msg,
+                    to_email=user.email,
+                    max_retries=email_retries,
+                    base_wait=email_wait,
+                )
+
+                if not ok:
+                    counters["email_fail"] += 1
+                    self.stdout.write(f"[EMAIL FAIL] {user.email} perf={perf.id} last_err={err}")
+                    # NON creo Notifica SENT -> così il job potrà riprovare in future run
+                    _sleep_with_jitter(sleep_s)
+                    continue
+
+                # salva Notifica dopo successo (dedupe reale)
+                with transaction.atomic():
                     Notifica.objects.create(
                         monitoraggio=m,
                         channel="email",
                         dedupe_key=dk,
                         status="SENT",
-                        sent_at=now,
+                        sent_at=timezone.now(),
                         message=msg,
                     )
-                    self.stdout.write(f"[EMAIL OK] {user.email} perf={perf.id}")
-            else:
-                self.stdout.write(f"[NO EMAIL PREF] user={user.email}")
 
-            notified += 1
-            snooze(sleep_s)
+                counters["notified"] += 1
+                self.stdout.write(f"[EMAIL OK] {user.email} perf={perf.id}")
+
+                _sleep_with_jitter(sleep_s)
+
+            except Exception as ex:
+                # qualsiasi eccezione non deve mai fermare il cron
+                self.stdout.write(f"[FATAL-SKIP] monitoraggio={getattr(m,'id',None)} err={ex}")
+                _sleep_with_jitter(sleep_s, heavy=True)
+                continue
 
         self.stdout.write(
-            f"[DONE] processed={done} notified={notified} "
-            f"skip_no_perf={skipped_no_perf} skip_internal={skipped_has_internal} "
-            f"skip_no_mapping={skipped_no_mapping} skip_not_avail={skipped_not_available} "
-            f"skip_tm_error={skipped_tm_error} skip_dedup={skipped_deduped}"
+            "[DONE] "
+            f"processed={counters['processed']} notified={counters['notified']} "
+            f"skip_no_perf={counters['skip_no_perf']} skip_internal={counters['skip_internal']} "
+            f"skip_no_mapping={counters['skip_no_mapping']} skip_not_avail={counters['skip_not_avail']} "
+            f"skip_dedup={counters['skip_dedup']} tm_error={counters['tm_error']} "
+            f"email_fail={counters['email_fail']} no_email_pref={counters['no_email_pref']}"
         )
