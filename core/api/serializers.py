@@ -651,24 +651,39 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
         if not expires and activated_at:
             expires = activated_at + timedelta(days=30)
 
-        # Stato
-        # - closed: evento passato
-        # - expired: PRO scaduto
-        # - active: PRO attivo (ab.attivo True) e non scaduto
-        # - pending: tutto il resto (es. in attesa di attivazione)
+        # Verifica se ha inviato almeno una notifica (email/alert)
+        has_sent_alerts = False
+        try:
+            has_sent_alerts = obj.notifiche.filter(status="SENT").exists()
+        except Exception:
+            pass
+
+        # Stato (nuova logica)
+        # 1. Chiuso: evento passato (data evento superata)
+        # 2. Scaduto: abbonamento scaduto MA evento ancora in programmazione
+        # 3. Attivo: ha inviato almeno una notifica/email
+        # 4. Pending: abbonamento attivo ma non ha ancora trovato biglietti
+        
         if event_date and event_date < now:
+            # Evento già passato -> CHIUSO
             status = "closed"
         elif expires and expires < now:
+            # Abbonamento scaduto (ma evento non ancora passato) -> SCADUTO
             status = "expired"
-        elif getattr(ab, "attivo", False):
+        elif has_sent_alerts:
+            # Ha inviato almeno una notifica -> ATTIVO
             status = "active"
+        elif getattr(ab, "attivo", False):
+            # Abbonamento attivo ma non ha ancora trovato biglietti -> PENDING
+            status = "pending"
         else:
+            # Altri casi (es. abbonamento non attivo) -> PENDING
             status = "pending"
 
         labels = {
             "active": "Attivo",
             "expired": "Scaduto",
-            "pending": "Pedding",
+            "pending": "Pending",
             "closed": "Chiuso",
         }
 
