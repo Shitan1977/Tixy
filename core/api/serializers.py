@@ -592,6 +592,7 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
       - status_label: 'Attivo' | 'Scaduto' | 'Pedding' | 'Chiuso'
     """
     id = serializers.IntegerField()
+    event_id = serializers.IntegerField(allow_null=True)
     event_title = serializers.CharField()
     event_date = serializers.DateTimeField(allow_null=True)
     activated_at = serializers.DateTimeField(allow_null=True)
@@ -687,8 +688,20 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
             "closed": "Chiuso",
         }
 
+        # Estrai event_id
+        event_id_value = None
+        if hasattr(obj, "evento_id") and obj.evento_id:
+            event_id_value = obj.evento_id
+        elif hasattr(obj, "evento") and obj.evento and hasattr(obj.evento, "id"):
+            event_id_value = obj.evento.id
+        elif perf and hasattr(perf, "evento_id") and perf.evento_id:
+            event_id_value = perf.evento_id
+        elif perf and hasattr(perf, "evento") and perf.evento and hasattr(perf.evento, "id"):
+            event_id_value = perf.evento.id
+
         return {
             "id": getattr(obj, "id", None),
+            "event_id": event_id_value,
             "event_title": title,
             "event_date": event_date,
             "activated_at": activated_at,
