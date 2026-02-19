@@ -50,19 +50,6 @@ def parse_local_date_time(e: dict) -> Tuple[Optional[str], Optional[str]]:
     return start.get("localDate"), start.get("localTime")
 
 
-def extract_url_id(url: str) -> Optional[str]:
-    """
-    Estrae l'ID URL da un URL Ticketmaster.
-    Es: 'https://www.ticketmaster.it/biglietti/elodie-ancona-24-04-2027/event/7pleq8zy8pi8' -> '7pleq8zy8pi8'
-    """
-    if not url:
-        return None
-    parts = url.rstrip("/").split("/")
-    if len(parts) >= 2 and parts[-2] == "event":
-        return parts[-1]
-    return None
-
-
 class Command(BaseCommand):
     help = "Scrub Ticketmaster NEW: import completo IT con windowing (streaming, robusto)."
 
@@ -152,17 +139,12 @@ class Command(BaseCommand):
                 if limit and i > limit:
                     break
 
-                tm_id_internal = e.get("id")
-                if not tm_id_internal:
+                tm_id = e.get("id")
+                if not tm_id:
                     continue
 
                 name = e.get("name") or ""
                 url = e.get("url") or ""
-
-                # Estrai l'ID URL dall'URL (es: '7pleq8zy8pi8' da 'https://www.ticketmaster.it/.../event/7pleq8zy8pi8')
-                tm_id_url = extract_url_id(url)
-                # Usa l'ID URL se disponibile, altrimenti fallback all'ID interno
-                tm_id = tm_id_url or tm_id_internal
 
                 # dateTime (UTC) se esiste
                 dates_start = (e.get("dates", {}) or {}).get("start", {}) or {}
@@ -228,7 +210,7 @@ class Command(BaseCommand):
 
                         # --- EVENTO ---
                         safe_slug_on_create = self.unique_slug(slug_base)
-                        evento, created = Evento.objects.get_or_create(
+                        evento, evento_created = Evento.objects.get_or_create(
                             hash_canonico=hash_canonico,
                             defaults={
                                 "slug": safe_slug_on_create,
@@ -238,7 +220,7 @@ class Command(BaseCommand):
                                 "note_raw": {"source": "ticketmaster"},
                             },
                         )
-                        if created:
+                        if evento_created:
                             created_evt += 1
                         else:
                             changed_evt = False
