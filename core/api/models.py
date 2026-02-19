@@ -389,15 +389,23 @@ class Sconti(models.Model):
 
 
 class AlertPlan(models.Model):
+    PLAN_TYPE = [
+        ("FREE", "Free"),
+        ("PRO", "PRO"),
+    ]
+    
     name = models.CharField(max_length=80)
+    plan_type = models.CharField(max_length=4, choices=PLAN_TYPE, default="FREE", help_text="Tipo di piano: Free o PRO")
     duration_days = models.IntegerField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=3, default="EUR")
-    max_events = models.IntegerField(default=50)
-    max_push_per_day = models.IntegerField(default=10)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.plan_type})"
+    
+    def is_pro(self):
+        """Verifica se è un piano PRO (senza limiti notifiche)"""
+        return self.plan_type == "PRO"
     
     class Meta:
         verbose_name="Piano Alert"
@@ -408,13 +416,34 @@ class Abbonamento(models.Model):
     utente = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="abbonamenti")
     sconto = models.ForeignKey(Sconti, on_delete=models.SET_NULL, null=True, blank=True, related_name="abbonamenti")
     plan = models.ForeignKey(AlertPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name="abbonamenti", verbose_name="Piano Alert")
+    
+    # Dati abbonamento
+    periodo = models.CharField(max_length=20, blank=True, null=True, help_text="Es: '1m', '3m', '12m', 'evento'")
+    mesi = models.IntegerField(blank=True, null=True, help_text="Numero mesi (0 per tipo 'evento')")
     prezzo = models.DecimalField(max_digits=10, decimal_places=2, default=0.0)
+    
+    # Date
     data_inizio = models.DateTimeField(auto_now_add=True)
     data_fine = models.DateTimeField(blank=True, null=True)
     attivo = models.BooleanField(default=True)
 
     def __str__(self):
         return f"abbonamento {self.id} utente {self.utente_id}"
+    
+    def is_expired(self):
+        """Verifica se l'abbonamento è scaduto"""
+        if not self.data_fine:
+            return False
+        from django.utils import timezone
+        return timezone.now() > self.data_fine
+    
+    def giorni_rimasti(self):
+        """Calcola i giorni rimanenti"""
+        if not self.data_fine or self.is_expired():
+            return 0
+        from django.utils import timezone
+        delta = self.data_fine - timezone.now()
+        return max(0, delta.days)
     
     class Meta:
         verbose_name="Abbonamento"

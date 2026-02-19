@@ -464,8 +464,59 @@ class AbbonamentoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         return qs.filter(utente=self.request.user)
 
     def perform_create(self, serializer):
-        # Imposta sempre l'utente autenticato
-        serializer.save(utente=self.request.user)
+        from datetime import timedelta
+        from django.utils import timezone
+        
+        # Recupera il piano se specificato
+        plan = serializer.validated_data.get('plan')
+        
+        # Calcola durata in giorni
+        giorni = None
+        if plan and plan.duration_days:
+            # Usa la durata del piano
+            giorni = plan.duration_days
+        elif 'data_fine_days' in self.request.data:
+            # Usa il valore custom dal frontend (per compatibilità)
+            try:
+                giorni = int(self.request.data.get('data_fine_days'))
+            except (ValueError, TypeError):
+                giorni = None
+        
+        # Se non c'è un valore, prova a derivarlo dal periodo
+        if not giorni:
+            periodo = self.request.data.get('periodo', '').strip().lower()
+            if periodo and periodo.endswith('m'):
+                try:
+                    mesi = int(periodo[:-1])
+                    giorni = 30 * mesi
+                except (ValueError, TypeError):
+                    pass
+            elif periodo == 'evento':
+                giorni = 60  # Default per tipo "evento"
+        
+        # Calcola data_fine
+        data_fine = None
+        if giorni:
+            data_fine = timezone.now() + timedelta(days=giorni)
+        
+        # Estrai periodo e mesi dal request
+        periodo = self.request.data.get('periodo', '')
+        mesi = None
+        if periodo and periodo.endswith('m'):
+            try:
+                mesi = int(periodo[:-1])
+            except (ValueError, TypeError):
+                mesi = None
+        elif periodo == 'evento':
+            mesi = 0
+        
+        # Salva con tutti i campi calcolati
+        serializer.save(
+            utente=self.request.user,
+            data_fine=data_fine,
+            periodo=periodo or None,
+            mesi=mesi
+        )
 
 
 class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):

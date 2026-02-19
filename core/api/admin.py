@@ -351,8 +351,9 @@ class AlertPlanAdmin(ModelAdmin):
     paginator = InfinitePaginator
     show_full_result_count = True
 
-    list_display = ("id", "name", "duration_days", "price", "currency", "max_events", "max_push_per_day")
+    list_display = ("id", "name", "plan_type", "duration_days", "price", "currency")
     list_display_links = ("id","name",)
+    list_filter = ("plan_type",)
 
 @admin.register(Abbonamento)
 class AbbonamentoAdmin(ModelAdmin):

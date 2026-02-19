@@ -249,10 +249,23 @@ class AbbonamentoSerializer(serializers.ModelSerializer):
     utente_info = ShortUserProfileSerializer(source="utente", read_only=True)
     plan_info = AlertPlanSerializer(source="plan", read_only=True)
     sconto_info = ScontiSerializer(source="sconto", read_only=True)
+    
+    # Campi calcolati automaticamente (read-only nel response)
+    giorni_rimasti = serializers.SerializerMethodField()
+    is_expired = serializers.SerializerMethodField()
+    
     class Meta:
         model = Abbonamento
         fields = "__all__"
-        read_only_fields = ("data_inizio", "utente",)  # <-- assicurati che "utente" sia qui
+        read_only_fields = ("data_inizio", "data_fine", "utente")  # data_fine è calcolata automaticamente
+    
+    def get_giorni_rimasti(self, obj):
+        """Restituisce i giorni rimanenti all'abbonamento"""
+        return obj.giorni_rimasti()
+    
+    def get_is_expired(self, obj):
+        """Verifica se l'abbonamento è scaduto"""
+        return obj.is_expired()
 
 
 class MonitoraggioSerializer(serializers.ModelSerializer):
