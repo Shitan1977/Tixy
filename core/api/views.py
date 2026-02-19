@@ -536,38 +536,28 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             .filter(abbonamento__utente=request.user)
         )
 
-        qs = qs_base
-        tried_db_filter = False
+        # Usa sempre fallback Python per maggiore flessibilità
+        # Includi TUTTI gli abbonamenti a pagamento (prezzo > 0), indipendentemente dal piano
+        rows = list(qs_base)  # materializziamo dalla query base
 
-        # 1) Tentativo ORM "ricco" (se il backend lo consente)
-        try:
-            tried_db_filter = True
-            qs = qs.filter(
-                Q(abbonamento__plan__name__icontains="pro")
-                | Q(abbonamento__plan__slug__icontains="pro")
-                | Q(abbonamento__plan__nome__icontains="pro")
-                | Q(abbonamento__plan__titolo__icontains="pro")
-                | Q(abbonamento__plan__tipo__iexact="PRO")
-                | Q(abbonamento__plan__livello__iexact="PRO")
-            )
-
-        except FieldError:
-            # Join/lookup non consentite → si va di fallback Python
-            qs = qs_base
-
-        # 2) Se il tentativo ORM non è possibile/affidabile, fallback Python
-        if not tried_db_filter or qs is qs_base:
-            rows = list(qs)  # materializziamo
-
-            def is_pro(item):
-                p = getattr(item.abbonamento, "plan", None)
-                if not p:
-                    # fallback: se non c'è plan, consideriamo PRO se l'abbonamento è attivo e il prezzo > 0
-                    try:
-                        prezzo = float(getattr(item.abbonamento, "prezzo", 0) or 0)
-                    except Exception:
-                        prezzo = 0
-                    return bool(getattr(item.abbonamento, "attivo", False)) and prezzo > 0
+        def is_pro(item):
+            ab = item.abbonamento
+            if not ab:
+                return False
+            
+            # Controlla il prezzo (abbonamenti a pagamento = PRO)
+            try:
+                prezzo = float(getattr(ab, "prezzo", 0) or 0)
+            except Exception:
+                prezzo = 0
+            
+            # Se ha prezzo > 0, è un abbonamento PRO
+            if prezzo > 0:
+                return True
+            
+            # Altrimenti verifica se il piano contiene "PRO"
+            p = getattr(ab, "plan", None)
+            if p:
                 txt = " ".join([
                     str(getattr(p, "name", "") or ""),
                     str(getattr(p, "slug", "") or ""),
@@ -578,17 +568,14 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
                 ]).lower()
                 # euristica: contiene "pro" o è esattamente "pro"
                 return ("pro" in txt) or (txt.strip() == "pro")
+            
+            return False
 
-            rows = [r for r in rows if is_pro(r)]
+        rows = [r for r in rows if is_pro(r)]
 
-            # paginazione DRF funziona anche con liste
-            page = self.paginate_queryset(rows)
-            ser = s.ProSubscriptionItemSerializer(page or rows, many=True, context={"request": request})
-            return self.get_paginated_response(ser.data) if page is not None else Response(ser.data)
-
-        # 3) Caso felice: filtro ORM riuscito → normale paginazione
-        page = self.paginate_queryset(qs)
-        ser = s.ProSubscriptionItemSerializer(page or qs, many=True, context={"request": request})
+        # paginazione DRF funziona anche con liste
+        page = self.paginate_queryset(rows)
+        ser = s.ProSubscriptionItemSerializer(page or rows, many=True, context={"request": request})
         return self.get_paginated_response(ser.data) if page is not None else Response(ser.data)
 
 
