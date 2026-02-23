@@ -16,7 +16,7 @@ from .views import (
     # search
     PerformanceSearchViewSet, autocomplete,
     # abbonamenti / alert
-    ScontiViewSet, AbbonamentoViewSet, MonitoraggioViewSet, NotificaViewSet, EventFollowViewSet,
+    ScontiViewSet, AlertPlanViewSet, AbbonamentoViewSet, MonitoraggioViewSet, NotificaViewSet, EventFollowViewSet,
     # marketplace legacy
     RivenditaViewSet, AcquistoViewSet,
     # performances (readonly con azioni /{id}/listings e /{id}/other_dates)
@@ -61,6 +61,7 @@ router.register(r'performances', PerformanceViewSet, basename='performances')
 
 # abbonamenti/alert
 router.register(r'sconti', ScontiViewSet, basename='sconti')
+router.register(r'alert-plans', AlertPlanViewSet, basename='alert-plans')
 router.register(r'abbonamenti', AbbonamentoViewSet, basename='abbonamenti')
 router.register(r'monitoraggi', MonitoraggioViewSet, basename='monitoraggi')
 router.register(r'notifiche', NotificaViewSet, basename='notifiche')

@@ -33,7 +33,7 @@ from .serializers import (
     UserProfileSerializer, ShortUserProfileSerializer, UserRegistrationSerializer, OTPVerificationSerializer,
     RecensioneSerializer, ArtistaSerializer, LuoghiSerializer, CategoriaSerializer,
     PiattaformaSerializer, EventoPiattaformaSerializer, EventoSerializer, PerformanceMiniSerializer,
-    ScontiSerializer, AbbonamentoSerializer, MonitoraggioSerializer, NotificaSerializer,
+    ScontiSerializer, AlertPlanSerializer, AbbonamentoSerializer, MonitoraggioSerializer, NotificaSerializer,
     BigliettoUploadSerializer, RivenditaSerializer, AcquistoSerializer, ListingCardSerializer,
     OrderTicketSerializer, OrderSummarySerializer, CheckoutStartSerializer,
     # aggiunti dal blocco di metà file:
@@ -45,7 +45,7 @@ from .serializers import (
 
 from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
-    Piattaforma, EventoPiattaforma, Sconti, Abbonamento, Monitoraggio,
+    Piattaforma, EventoPiattaforma, Sconti, AlertPlan, Abbonamento, Monitoraggio,
     Notifica, Biglietto, Rivendita, Acquisto, Listing, OrderTicket, Recensione,
     TicketUpload, SupportTicket, SupportMessage, SupportAttachment, EventFollow
 )
@@ -448,6 +448,13 @@ class ScontiViewSet(viewsets.ModelViewSet):
     queryset = Sconti.objects.all()
     serializer_class = ScontiSerializer
     permission_classes = [IsAdminOrReadOnly]
+
+
+class AlertPlanViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet di sola lettura per AlertPlan - i piani sono configurati da admin"""
+    queryset = AlertPlan.objects.all().order_by('duration_days')
+    serializer_class = AlertPlanSerializer
+    permission_classes = [permissions.AllowAny]  # Visibile anche a utenti non autenticati
 
 
 class AbbonamentoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
