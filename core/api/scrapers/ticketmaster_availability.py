@@ -293,6 +293,8 @@ def check_ticketmaster_page_availability(
         "aggiungi al carrello",
         "on sale",
         "in vendita",
+        "rivendita",
+		"isResale",
     ]
 
     last_exc: Optional[str] = None
