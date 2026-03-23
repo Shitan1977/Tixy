@@ -16,7 +16,6 @@ from selenium.webdriver.firefox.service import Service
 DISCOVERY_PAGES = [
     "https://www.fansale.it/events/55",
     "https://www.fansale.it/events/new",
-
     "https://www.fansale.it/events/55/Pop",
     "https://www.fansale.it/events/55/Metal",
     "https://www.fansale.it/events/55/Jazz",
@@ -26,7 +25,7 @@ DISCOVERY_PAGES = [
 SEED_FILE = "fansale_seed_artists.txt"
 
 
-def get_firefox_binary():
+def get_firefox_binary() -> str:
     paths = [
         "/snap/firefox/current/usr/lib/firefox/firefox",
         "/usr/bin/firefox",
@@ -52,6 +51,10 @@ def build_driver():
     return driver
 
 
+def normalize_artist_url(url: str) -> str:
+    return url.split("#")[0].strip()
+
+
 def fetch_html_with_driver(driver, url: str, wait_seconds: int = 8) -> str:
     driver.get(url)
     time.sleep(3)
@@ -74,12 +77,20 @@ def fetch_html_with_driver(driver, url: str, wait_seconds: int = 8) -> str:
     return driver.page_source
 
 
+def safe_fetch_html(driver, url: str, wait_seconds: int = 8) -> str:
+    """
+    Wrapper robusto: rilancia l'eccezione al chiamante,
+    ma centralizza eventuali estensioni future.
+    """
+    return fetch_html_with_driver(driver, url, wait_seconds=wait_seconds)
+
+
 def extract_artist_profile_urls(html: str) -> List[str]:
     """
-    Estrae SOLO link profilo artista:
+    Estrae SOLO profili artista del tipo:
     /tickets/all/<slug>/<id>
 
-    Esclude link offerta/evento:
+    Esclude automaticamente:
     /tickets/all/<slug>/<id>/<offer_id>
     """
     soup = BeautifulSoup(html, "html.parser")
@@ -87,12 +98,14 @@ def extract_artist_profile_urls(html: str) -> List[str]:
     seen = set()
 
     for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
+        href = a.get("href", "").strip()
+        if not href:
+            continue
 
         if not re.fullmatch(r"/tickets/all/[^/]+/\d+", href):
             continue
 
-        full = "https://www.fansale.it" + href
+        full = normalize_artist_url("https://www.fansale.it" + href)
 
         if full in seen:
             continue
@@ -114,8 +127,7 @@ def load_existing_seed(filepath: str) -> Set[str]:
             url = line.strip()
             if not url:
                 continue
-            url = url.split("#")[0].strip()
-            existing.add(url)
+            existing.add(normalize_artist_url(url))
 
     return existing
 
@@ -125,7 +137,7 @@ def append_new_seed_urls(filepath: str, urls: List[str]) -> int:
     new_urls = []
 
     for url in urls:
-        clean = url.split("#")[0].strip()
+        clean = normalize_artist_url(url)
         if clean and clean not in existing:
             existing.add(clean)
             new_urls.append(clean)
@@ -151,30 +163,36 @@ class Command(BaseCommand):
         max_pages = options["pages"]
         wait_seconds = options["wait"]
 
-        driver = build_driver()
-        all_found = []
-        seen = set()
+        all_found: List[str] = []
+        seen: Set[str] = set()
         scanned = 0
 
+        # =========================================================
+        # First pass: discovery su pagine generali
+        # =========================================================
+        driver = None
         try:
-            for base_url in DISCOVERY_PAGES:
-                for page_num in range(1, max_pages + 1):
-                    if "?page=" in base_url:
-                        page_url = base_url
-                    else:
-                        page_url = base_url if page_num == 1 else f"{base_url}?page={page_num}"
+            driver = build_driver()
 
+            for base_url in DISCOVERY_PAGES:
+                consecutive_zero = 0
+
+                for page_num in range(1, max_pages + 1):
+                    page_url = base_url if page_num == 1 else f"{base_url}?page={page_num}"
                     self.stdout.write(f"[DISCOVERY PAGE] {page_url}")
 
                     try:
-                        html = fetch_html_with_driver(driver, page_url, wait_seconds=wait_seconds)
-                    except WebDriverException as e:
+                        html = safe_fetch_html(driver, page_url, wait_seconds=wait_seconds)
+                    except Exception as e:
                         self.stdout.write(self.style.WARNING(f"[ERROR] {page_url} -> {e}"))
+                        consecutive_zero += 1
+                        if consecutive_zero >= 3:
+                            break
                         continue
 
                     scanned += 1
                     urls = extract_artist_profile_urls(html)
-                    new_urls = [u for u in urls if u not in seen]
+                    new_urls = [normalize_artist_url(u) for u in urls if normalize_artist_url(u) not in seen]
 
                     for u in new_urls:
                         seen.add(u)
@@ -184,15 +202,64 @@ class Command(BaseCommand):
                         f"[FOUND] matched={len(urls)} new={len(new_urls)} total_unique={len(all_found)}"
                     )
 
-                    if len(urls) == 0 and page_num > 3:
-                        # piccolo stop euristico
+                    if len(new_urls) == 0:
+                        consecutive_zero += 1
+                    else:
+                        consecutive_zero = 0
+
+                    if consecutive_zero >= 3:
                         break
 
         finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
+        # =========================================================
+        # Second pass: discovery dentro le pagine artista già trovate
+        # =========================================================
+        second_pass_urls = list(all_found)
+
+        second_driver = None
+        try:
+            if second_pass_urls:
+                second_driver = build_driver()
+
+                for artist_url in second_pass_urls:
+                    clean_artist_url = normalize_artist_url(artist_url)
+                    self.stdout.write(f"[ARTIST DISCOVERY] {clean_artist_url}")
+
+                    try:
+                        html = safe_fetch_html(second_driver, clean_artist_url, wait_seconds=wait_seconds)
+                    except Exception as e:
+                        self.stdout.write(
+                            self.style.WARNING(f"[ERROR ARTIST] {clean_artist_url} -> {e}")
+                        )
+                        continue
+
+                    urls = extract_artist_profile_urls(html)
+                    new_urls = [
+                        normalize_artist_url(u)
+                        for u in urls
+                        if normalize_artist_url(u) not in seen
+                    ]
+
+                    for u in new_urls:
+                        seen.add(u)
+                        all_found.append(u)
+
+                    self.stdout.write(
+                        f"[ARTIST FOUND] matched={len(urls)} new={len(new_urls)} total_unique={len(all_found)}"
+                    )
+
+        finally:
+            if second_driver is not None:
+                try:
+                    second_driver.quit()
+                except Exception:
+                    pass
 
         written = append_new_seed_urls(SEED_FILE, all_found)
 
