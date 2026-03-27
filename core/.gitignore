@@ -463,3 +463,6 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/django,python,intellij,pycharm
 # Exclude frontend from backend repo
 frontend_site/
+debug_fansale/
+debug_fansale_prices/
+*.log.old
