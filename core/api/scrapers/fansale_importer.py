@@ -363,7 +363,7 @@ def import_single_event(item: FanSaleEventData, verbose: bool = False) -> str:
     if ep_obj:
         changed = False
 
-        if ep_obj.id_evento_piattaforma != item.external_sid:
+        if ep_obj.id_evento_piattaforma != item.external_id:
             ep_obj.id_evento_piattaforma = item.external_id
             changed = True
 
