@@ -9,7 +9,7 @@ from rest_framework import serializers
 from typing import List
 from decimal import Decimal
 import hashlib
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Q
 from rest_framework.exceptions import ValidationError
 
 from .models import (
@@ -432,6 +432,7 @@ class ListingCardSerializer(serializers.ModelSerializer):
     seller_reviews_count = serializers.IntegerField(read_only=True)
     seller_rating_avg = serializers.DecimalField(max_digits=3, decimal_places=2, read_only=True)
     total_price = serializers.SerializerMethodField()
+    public_subitems = serializers.SerializerMethodField()
 
     class Meta:
         model = Listing
@@ -445,11 +446,12 @@ class ListingCardSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
             "seller_reviews_count", "seller_rating_avg",
             "total_price",
+            "public_subitems",
             "is_top",  # <-- QUI
         )
         read_only_fields = (
             "created_at", "updated_at",
-            "seller_reviews_count", "seller_rating_avg", "total_price",
+            "seller_reviews_count", "seller_rating_avg", "total_price", "public_subitems",
             "is_top",  # se vuoi tenerlo read-only in questa scheda
         )
 
@@ -459,13 +461,48 @@ class ListingCardSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    def get_public_subitems(self, obj):
+        qs = (
+            obj.subitems
+            .select_related("subitem")
+            .filter(subitem__is_sold=False)
+            .order_by("subitem_id")
+        )
+        subitems = [rel.subitem for rel in qs if getattr(rel, "subitem", None) is not None]
+        return TicketSubitemMiniSerializer(subitems, many=True, context=self.context).data
+
 
 
 
 class RivenditaSerializer(serializers.ModelSerializer):
+    venditore_nome_iniziale = serializers.SerializerMethodField()
+    subitems_list = serializers.SerializerMethodField()
+    evento_info = PerformanceMiniSerializer(source="evento", read_only=True)
+    qty = serializers.SerializerMethodField()
+
     class Meta:
         model = Rivendita
-        fields = "__all__"
+        fields = ("id", "evento", "evento_info", "venditore", "venditore_nome_iniziale", "biglietto", 
+                  "subitems", "subitems_list", "url", "prezzo", "qty", "disponibile", "status", "creato_il", "aggiornato_il")
+
+    def get_venditore_nome_iniziale(self, obj):
+        """Formatta il nome come 'M. Rossi' (prima lettera nome + punto + cognome)"""
+        if not obj.venditore:
+            return None
+        first_name = (obj.venditore.first_name or "").strip()
+        last_name = (obj.venditore.last_name or "").strip()
+        if not first_name or not last_name:
+            return None
+        return f"{first_name[0]}. {last_name}"
+
+    def get_subitems_list(self, obj):
+        """Serializza i subitems con TicketSubitemMiniSerializer"""
+        subitems = obj.subitems.all()
+        return TicketSubitemMiniSerializer(subitems, many=True).data
+
+    def get_qty(self, obj):
+        """Numero di biglietti disponibili per questa rivendita"""
+        return obj.subitems.count()
 
 
 class AcquistoSerializer(serializers.ModelSerializer):
@@ -499,6 +536,43 @@ class CheckoutStartSerializer(serializers.Serializer):
             raise serializers.ValidationError({"listing": "listing not active"})
         if qty > listing.qty:
             raise serializers.ValidationError({"qty": f"exceeds listing qty ({listing.qty} available)"})
+        if not attrs.get("accepted_terms"):
+            raise serializers.ValidationError({"accepted_terms": "terms must be accepted"})
+        if not attrs.get("accepted_privacy"):
+            raise serializers.ValidationError({"accepted_privacy": "privacy must be accepted"})
+        if attrs.get("create_account") and not attrs.get("password"):
+            raise serializers.ValidationError({"password": "required when create_account is true"})
+        return attrs
+
+
+class CheckoutRivenditaSerializer(serializers.Serializer):
+    """Checkout per Rivendita"""
+    rivendita = serializers.PrimaryKeyRelatedField(queryset=Rivendita.objects.all())
+    qty = serializers.IntegerField(min_value=1)
+    # buyer fields (anche per guest)
+    email = serializers.EmailField()
+    first_name = serializers.CharField(max_length=100)
+    last_name = serializers.CharField(max_length=100)
+    phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    # opzionale: crea account
+    create_account = serializers.BooleanField(default=False)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=False)
+    accepted_terms = serializers.BooleanField()
+    accepted_privacy = serializers.BooleanField()
+    # fee opzionali per UI (commissioni/spese gestione)
+    fee_percent = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
+    fee_flat = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+
+    def validate(self, attrs):
+        rivendita: Rivendita = attrs["rivendita"]
+        qty = attrs["qty"]
+        if rivendita.status != "PUBLISHED":
+            raise serializers.ValidationError({"rivendita": "rivendita not available"})
+        if not rivendita.disponibile:
+            raise serializers.ValidationError({"rivendita": "rivendita no longer available"})
+        max_qty = rivendita.subitems.count()
+        if qty > max_qty:
+            raise serializers.ValidationError({"qty": f"exceeds rivendita qty ({max_qty} available)"})
         if not attrs.get("accepted_terms"):
             raise serializers.ValidationError({"accepted_terms": "terms must be accepted"})
         if not attrs.get("accepted_privacy"):
@@ -601,8 +675,8 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
       - event_date: data fine/inizio evento (usa Performance.starts_at_utc se presente)
       - activated_at: data attivazione abbonamento PRO (Abbonamento.data_inizio)
       - expires_at: scadenza dell’alert PRO (Abbonamento.expires_at o calcolo da plan.periodo_mesi)
-      - status: 'active' | 'expired' | 'pending' | 'closed'
-      - status_label: 'Attivo' | 'Scaduto' | 'Pedding' | 'Chiuso'
+    - status: 'active' | 'expired' | 'closed'
+    - status_label: 'Attivo' | 'Scaduto' | 'Chiuso'
     """
     id = serializers.IntegerField()
     event_id = serializers.IntegerField(allow_null=True)
@@ -665,18 +739,10 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
         if not expires and activated_at:
             expires = activated_at + timedelta(days=30)
 
-        # Verifica se ha inviato almeno una notifica (email/alert)
-        has_sent_alerts = False
-        try:
-            has_sent_alerts = obj.notifiche.filter(status="SENT").exists()
-        except Exception:
-            pass
-
-        # Stato (nuova logica)
+        # Stato:
         # 1. Chiuso: evento passato (data evento superata)
         # 2. Scaduto: abbonamento scaduto MA evento ancora in programmazione
-        # 3. Attivo: ha inviato almeno una notifica/email
-        # 4. Pending: abbonamento attivo ma non ha ancora trovato biglietti
+        # 3. Attivo: abbonamento nel periodo valido (mai Pending)
         
         if event_date and event_date < now:
             # Evento già passato -> CHIUSO
@@ -684,20 +750,13 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
         elif expires and expires < now:
             # Abbonamento scaduto (ma evento non ancora passato) -> SCADUTO
             status = "expired"
-        elif has_sent_alerts:
-            # Ha inviato almeno una notifica -> ATTIVO
-            status = "active"
-        elif getattr(ab, "attivo", False):
-            # Abbonamento attivo ma non ha ancora trovato biglietti -> PENDING
-            status = "pending"
         else:
-            # Altri casi (es. abbonamento non attivo) -> PENDING
-            status = "pending"
+            # Tutti i casi restanti sono ATTIVO finche non scade o non passa l'evento
+            status = "active"
 
         labels = {
             "active": "Attivo",
             "expired": "Scaduto",
-            "pending": "Pending",
             "closed": "Chiuso",
         }
 
@@ -748,7 +807,7 @@ def sha256_of_file(inmem_file) -> str:
 # --- 1B) Upload PDF ---
 class TicketUploadPDFSerializer(serializers.Serializer):
     path_file = serializers.FileField()
-    performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all())
+    performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all(), required=False, allow_null=True)
 
     def validate_path_file(self, f):
         ext = (f.name or "").lower()
@@ -764,12 +823,21 @@ class TicketUploadPDFSerializer(serializers.Serializer):
         f = validated_data["path_file"]
         perf = validated_data.get("performance")
 
-        big = Biglietto.objects.create(path_file=f, nome_file=f.name, is_valid=False)
+        big = Biglietto.objects.create(
+            path_file=f,
+            nome_file=f.name,
+            is_valid=False,
+            performance=perf,
+            evento=getattr(perf, "evento", None) if perf else None,
+        )
         upload = TicketUpload.objects.create(seller=user, biglietto=big)
 
-        # Avvia parsing async (o sync fallback)
+        # Avvia parsing: prova async (Celery+Redis), fallback sync se broker non disponibile
         from .tasks import parse_ticket_pdf
-        parse_ticket_pdf.delay(upload.id)
+        try:
+            parse_ticket_pdf.delay(upload.id)
+        except Exception:
+            parse_ticket_pdf.apply((upload.id,))
 
         return {"upload_id": upload.id}
 
@@ -784,22 +852,40 @@ class TicketUploadURLSerializer(serializers.Serializer):
         request = self.context["request"]
         user = request.user
         url = validated_data["url"]
+        perf = validated_data.get("performance")
 
         # crea un Biglietto "vuoto" (verrà popolato dal task che scarica il PDF)
-        big = Biglietto.objects.create(is_valid=False)
+        big = Biglietto.objects.create(
+            is_valid=False,
+            performance=perf,
+            evento=getattr(perf, "evento", None) if perf else None,
+        )
         upload = TicketUpload.objects.create(seller=user, biglietto=big, source_url=url)
 
         from .tasks import parse_ticket_pdf
-        parse_ticket_pdf.delay(upload.id)
+        try:
+            parse_ticket_pdf.delay(upload.id)
+        except Exception:
+            parse_ticket_pdf.apply((upload.id,))
 
         return {"upload_id": upload.id}
 
     def save(self, **kwargs):
         return self.create(self.validated_data)
 class TicketSubitemMiniSerializer(serializers.ModelSerializer):
+    code_value = serializers.SerializerMethodField()
+
     class Meta:
         model = TicketSubitem
-        fields = ("id", "full_name", "price", "page", "code_type", "is_listed", "is_sold")
+        fields = ("id", "full_name", "price", "page", "code_type", "code_value", "is_listed", "is_sold")
+
+    def get_code_value(self, obj):
+        raw = (obj.code_raw or "").strip()
+        if not raw:
+            return None
+        if len(raw) <= 6:
+            return raw
+        return ("*" * max(0, len(raw) - 6)) + raw[-6:]
 
 # --- 2A) Subitem (pezzo singolo vendibile) ---
 class TicketSubitemSerializer(serializers.ModelSerializer):
@@ -839,8 +925,13 @@ class TicketUploadReviewSerializer(serializers.ModelSerializer):
 
     def get_biglietto_info(self, obj):
         b = obj.biglietto
-        perf = None
-        # se vuoi, puoi inferire performance da logica tua (qui non forziamo)
+        perf = getattr(b, "performance", None)
+        meta = b.extracted_meta or {}
+        event_name = meta.get("event_name") or (perf.evento.nome_evento if perf and perf.evento else None)
+        venue = meta.get("venue") or (perf.luogo.nome if perf and perf.luogo else None)
+        event_date_iso = meta.get("event_date_iso") or (perf.starts_at_utc.isoformat() if perf else None)
+        barcode = b.qr_code or ""
+        sigillo = b.sigillo_fiscale or ""
         return {
             "id": b.id,
             "nome_file": b.nome_file,
@@ -849,7 +940,22 @@ class TicketUploadReviewSerializer(serializers.ModelSerializer):
             "tickets_found": b.tickets_found,
             "extracted_names": b.extracted_names,
             "extracted_prices": b.extracted_prices,
+            "source_kind": "E_TICKET" if obj.source_url else "PDF",
+            "event_name": event_name,
+            "venue": venue,
+            "event_date_iso": event_date_iso,
+            "sigillo_fiscale_masked": (("*" * max(0, len(sigillo) - 4)) + sigillo[-4:]) if sigillo else None,
+            "barcode_masked": (("*" * max(0, len(barcode) - 6)) + barcode[-6:]) if barcode else None,
+            "performance": {
+                "id": perf.id,
+                "evento_nome": perf.evento.nome_evento,
+                "luogo_nome": perf.luogo.nome,
+                "starts_at_utc": perf.starts_at_utc,
+            } if perf else None,
+            "requires_confirmation": bool(meta.get("requires_confirmation", True)),
         }
+
+
 class ListingCreateFromUploadSerializer(serializers.Serializer):
     upload_id = serializers.IntegerField()
     subitem_ids = serializers.ListField(child=serializers.IntegerField(), min_length=1)
@@ -858,15 +964,27 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
     delivery_method = serializers.ChoiceField(choices=Listing.DELIVERY, default="PDF")
     change_name_required = serializers.BooleanField(default=False)
     notes = serializers.CharField(allow_blank=True, required=False)
-    performance = serializers.PrimaryKeyRelatedField(  # <— AGGIUNGI
-        queryset=Performance.objects.all(), required=False, allow_null=True
-    )
+    performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all(), required=False, allow_null=True)
+
+    def _has_active_identifier_conflict(self, upload: TicketUpload, selected_subitems):
+        sigillo = upload.biglietto.sigillo_fiscale
+        code_hashes = list(selected_subitems.values_list("code_hash", flat=True))
+        active = Listing.objects.filter(status__in=["ACTIVE", "RESERVED"])
+        if sigillo and active.filter(subitems__subitem__biglietto__sigillo_fiscale=sigillo).exists():
+            return True
+        if code_hashes and active.filter(subitems__subitem__code_hash__in=code_hashes).exists():
+            return True
+        return False
 
     def validate(self, attrs):
         upload = get_object_or_404(TicketUpload, pk=attrs["upload_id"])
         request = self.context["request"]
         if not (request.user.is_staff or upload.seller_id == request.user.id):
             raise serializers.ValidationError("not allowed")
+        if upload.status != "READY":
+            raise serializers.ValidationError("upload non pronto o non valido")
+        if not upload.biglietto.is_valid:
+            raise serializers.ValidationError("biglietto non valido")
 
         qs = TicketSubitem.objects.filter(
             id__in=attrs["subitem_ids"], biglietto=upload.biglietto, is_listed=False
@@ -874,12 +992,20 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
         if qs.count() != len(attrs["subitem_ids"]):
             raise serializers.ValidationError("some selected tickets are not available")
 
-        # performance: payload > inferita dal biglietto
-        perf = attrs.get("performance")
-        if perf is None:
-            perf = getattr(upload.biglietto, "performance", None)
+        perf = attrs.get("performance") or getattr(upload.biglietto, "performance", None)
         if perf is None:
             raise serializers.ValidationError("performance mancante: passala nel payload o associane una al biglietto")
+        if perf.starts_at_utc <= timezone.now():
+            raise serializers.ValidationError("non puoi rivendere biglietti per eventi gia passati")
+        if self._has_active_identifier_conflict(upload, qs):
+            raise serializers.ValidationError("sigillo fiscale o barcode gia in vendita")
+
+        requested_price = attrs.get("price_each")
+        price_caps = [item.price for item in qs if item.price is not None]
+        if requested_price is not None and price_caps:
+            max_allowed = min(price_caps)
+            if requested_price > max_allowed:
+                raise serializers.ValidationError({"price_each": f"il prezzo massimo consentito e {max_allowed}"})
 
         attrs["_upload"] = upload
         attrs["_subitems_qs"] = qs
@@ -887,7 +1013,6 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
         return attrs
 
     def create(self, validated_data):
-        upload = validated_data["_upload"]
         sub_qs = validated_data["_subitems_qs"]
         performance = validated_data["_performance"]
         user = self.context["request"].user
@@ -900,15 +1025,18 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 price_each=validated_data["price_each"],
                 currency=validated_data["currency"],
                 delivery_method=validated_data["delivery_method"],
+                change_name_required=validated_data.get("change_name_required", False),
                 notes=validated_data.get("notes") or "",
                 status="ACTIVE",
             )
-            # collega subitems + marca is_listed
             for sbi in sub_qs.select_for_update():
                 ListingSubitem.objects.create(listing=listing, subitem=sbi)
                 sbi.is_listed = True
-                sbi.listed_at = timezone.now()
-                sbi.save(update_fields=["is_listed", "listed_at"])
+                if hasattr(sbi, "listed_at"):
+                    sbi.listed_at = timezone.now()
+                    sbi.save(update_fields=["is_listed", "listed_at"])
+                else:
+                    sbi.save(update_fields=["is_listed"])
 
         return {
             "listing_id": listing.id,
@@ -919,6 +1047,111 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
             "status": listing.status,
         }
 
+
+class ListingSelectionUpdateSerializer(serializers.Serializer):
+    subitem_ids = serializers.ListField(child=serializers.IntegerField(), min_length=1)
+
+    def _get_source_biglietto(self, listing: Listing):
+        relation = listing.subitems.select_related("subitem__biglietto").first()
+        if not relation or not relation.subitem:
+            raise serializers.ValidationError("listing senza biglietti associati")
+        return relation.subitem.biglietto
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        listing = self.context["listing"]
+
+        if not (request.user.is_staff or request.user.id == listing.seller_id):
+            raise serializers.ValidationError("not allowed")
+        if listing.status != "ACTIVE":
+            raise serializers.ValidationError("puoi modificare solo annunci attivi")
+
+        requested_ids = list(dict.fromkeys(attrs.get("subitem_ids") or []))
+        if not requested_ids:
+            raise serializers.ValidationError({"subitem_ids": "seleziona almeno un biglietto"})
+
+        source_biglietto = self._get_source_biglietto(listing)
+
+        current_unsold_ids = set(
+            listing.subitems.filter(subitem__is_sold=False).values_list("subitem_id", flat=True)
+        )
+        current_sold_ids = set(
+            listing.subitems.filter(subitem__is_sold=True).values_list("subitem_id", flat=True)
+        )
+
+        selectable_qs = (
+            TicketSubitem.objects
+            .filter(biglietto=source_biglietto, is_sold=False)
+            .filter(Q(is_listed=False) | Q(listings__listing=listing))
+            .distinct()
+        )
+        selected_qs = selectable_qs.filter(id__in=requested_ids)
+        selected_ids = set(selected_qs.values_list("id", flat=True))
+        if len(selected_ids) != len(requested_ids):
+            raise serializers.ValidationError(
+                {"subitem_ids": "alcuni biglietti selezionati non sono disponibili per la modifica"}
+            )
+
+        price_caps = [item.price for item in selected_qs if item.price is not None]
+        if price_caps:
+            max_allowed = min(price_caps)
+            if listing.price_each > max_allowed:
+                raise serializers.ValidationError(
+                    {"subitem_ids": f"il prezzo del listing supera il massimo consentito di {max_allowed}"}
+                )
+
+        attrs["subitem_ids"] = requested_ids
+        attrs["_listing"] = listing
+        attrs["_source_biglietto"] = source_biglietto
+        attrs["_current_unsold_ids"] = current_unsold_ids
+        attrs["_current_sold_ids"] = current_sold_ids
+        attrs["_selected_qs"] = selected_qs
+        return attrs
+
+    def create(self, validated_data):
+        listing = validated_data["_listing"]
+        requested_ids = set(validated_data["subitem_ids"])
+        current_unsold_ids = validated_data["_current_unsold_ids"]
+        source_biglietto = validated_data["_source_biglietto"]
+
+        to_remove = current_unsold_ids - requested_ids
+        to_add = requested_ids - current_unsold_ids
+
+        with transaction.atomic():
+            locked_listing = Listing.objects.select_for_update().get(pk=listing.pk)
+            if locked_listing.status != "ACTIVE":
+                raise serializers.ValidationError("puoi modificare solo annunci attivi")
+
+            if to_remove:
+                TicketSubitem.objects.select_for_update().filter(id__in=to_remove).update(is_listed=False)
+                ListingSubitem.objects.filter(listing=locked_listing, subitem_id__in=to_remove).delete()
+
+            if to_add:
+                subitems_to_add = (
+                    TicketSubitem.objects
+                    .select_for_update()
+                    .filter(id__in=to_add, biglietto=source_biglietto, is_sold=False)
+                    .filter(Q(is_listed=False) | Q(listings__listing=locked_listing))
+                    .distinct()
+                )
+                if subitems_to_add.count() != len(to_add):
+                    raise serializers.ValidationError(
+                        {"subitem_ids": "alcuni biglietti non sono piu disponibili, aggiorna la pagina"}
+                    )
+                for subitem in subitems_to_add:
+                    ListingSubitem.objects.get_or_create(listing=locked_listing, subitem=subitem)
+                subitems_to_add.update(is_listed=True)
+
+            locked_listing.qty = len(requested_ids)
+            locked_listing.save(update_fields=["qty", "updated_at"])
+
+        return {
+            "listing_id": listing.id,
+            "qty": len(requested_ids),
+            "sold_qty": len(validated_data["_current_sold_ids"]),
+            "message": "Annuncio aggiornato.",
+        }
+
 class MyResaleListItemSerializer(serializers.ModelSerializer):
     performance_info = PerformanceMiniSerializer(source="performance", read_only=True)
     seller_info = ShortUserProfileSerializer(source="seller", read_only=True)
@@ -926,6 +1159,8 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
     sold_qty = serializers.SerializerMethodField()
     is_fully_sold = serializers.SerializerMethodField()
     change_name_required = serializers.SerializerMethodField()
+    selected_subitem_ids = serializers.SerializerMethodField()
+    editable_subitems = serializers.SerializerMethodField()
 
     class Meta:
         model = Listing
@@ -934,6 +1169,7 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
             "performance_info", "seller_info",
             "download_url", "sold_qty", "is_fully_sold",
             "change_name_required",     # <-- AGGIUNTO
+            "selected_subitem_ids", "editable_subitems",
             "notes", "created_at",
         )
 
@@ -953,7 +1189,7 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
         return obj.subitems.filter(subitem__is_sold=True).count()
 
     def get_is_fully_sold(self, obj):
-        return self.get_sold_qty(obj) >= (obj.qty or 0)
+        return obj.status == "SOLD" or (obj.qty or 0) <= 0
 
     def get_change_name_required(self, obj):
         """
@@ -984,6 +1220,25 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
 
         # 2) Fallback: euristica
         return obj.delivery_method in ("PDF", "E_TICKET")
+
+    def get_selected_subitem_ids(self, obj):
+        return list(
+            obj.subitems.filter(subitem__is_sold=False).values_list("subitem_id", flat=True)
+        )
+
+    def get_editable_subitems(self, obj):
+        relation = obj.subitems.select_related("subitem__biglietto").first()
+        if not relation or not relation.subitem:
+            return []
+        biglietto = relation.subitem.biglietto
+        qs = (
+            TicketSubitem.objects
+            .filter(biglietto=biglietto, is_sold=False)
+            .filter(Q(is_listed=False) | Q(listings__listing=obj))
+            .distinct()
+            .order_by("id")
+        )
+        return TicketSubitemMiniSerializer(qs, many=True, context=self.context).data
 
 
 class MarkListingSoldSerializer(serializers.Serializer):
@@ -1038,58 +1293,6 @@ class ListingSubitemInlineSerializer(serializers.ModelSerializer):
     class Meta:
         model = ListingSubitem
         fields = ("id", "subitem")  # o denormalizza fields utili
-
-# api/serializers.py (aggiunte)
-class ListingCreateFromUploadSerializer(serializers.Serializer):
-    upload_id = serializers.IntegerField()
-    subitem_ids = serializers.ListField(child=serializers.IntegerField(), min_length=1)
-    price_each = serializers.DecimalField(max_digits=10, decimal_places=2)
-    currency = serializers.CharField(max_length=3, default="EUR")
-    delivery_method = serializers.ChoiceField(choices=Listing.DELIVERY, default="PDF")
-    change_name_required = serializers.BooleanField(default=False)
-    notes = serializers.CharField(allow_blank=True, required=False)
-    performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all(), required=True)  # 👈 NEW
-
-    def validate(self, attrs):
-        upload = get_object_or_404(TicketUpload, pk=attrs["upload_id"])
-        request = self.context["request"]
-        if not (request.user.is_staff or upload.seller_id == request.user.id):
-            raise serializers.ValidationError("not allowed")
-
-        qs = TicketSubitem.objects.filter(id__in=attrs["subitem_ids"], biglietto=upload.biglietto, is_listed=False)
-        if qs.count() != len(attrs["subitem_ids"]):
-            raise serializers.ValidationError("some selected tickets are not available")
-
-        attrs["_upload"] = upload
-        attrs["_subitems_qs"] = qs
-        return attrs
-
-    def create(self, validated_data):
-        upload = validated_data["_upload"]
-        sub_qs = validated_data["_subitems_qs"]
-        user = self.context["request"].user
-        performance = validated_data["performance"]  # 👈 usare quella passata
-
-        with transaction.atomic():
-            listing = Listing.objects.create(
-                seller=user,
-                performance=performance,
-                qty=sub_qs.count(),
-                price_each=validated_data["price_each"],
-                currency=validated_data["currency"],
-                delivery_method=validated_data["delivery_method"],
-                notes=validated_data.get("notes") or "",
-                status="ACTIVE",
-            )
-            for sbi in sub_qs.select_for_update():
-                ListingSubitem.objects.create(listing=listing, subitem=sbi)
-                sbi.is_listed = True
-                sbi.save(update_fields=["is_listed"])
-
-        return {"listing_id": listing.id, "qty": listing.qty, "price_each": str(listing.price_each),
-                "currency": listing.currency, "performance_id": listing.performance_id, "status": listing.status}
-
-# api/serializers.py (aggiunte)
 
 from rest_framework import serializers
 from .models import SupportTicket, SupportMessage, SupportAttachment, OrderTicket, Listing, Biglietto, TicketUpload

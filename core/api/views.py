@@ -16,7 +16,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, permissions, status, generics, filters, mixins, serializers
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import NotFound, PermissionDenied
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -37,7 +37,7 @@ from .serializers import (
     BigliettoUploadSerializer, RivenditaSerializer, AcquistoSerializer, ListingCardSerializer,
     OrderTicketSerializer, OrderSummarySerializer, CheckoutStartSerializer,
     # aggiunti dal blocco di metà file:
-    TicketDownloadSerializer, MarkListingSoldSerializer,
+    TicketDownloadSerializer, MarkListingSoldSerializer, ListingSelectionUpdateSerializer,
     TicketUploadPDFSerializer, TicketUploadURLSerializer, TicketUploadReviewSerializer,
     ListingCreateFromUploadSerializer, MyResaleListItemSerializer,
     EventFollowSerializer, EventFollowListSerializer,
@@ -705,9 +705,18 @@ class EventFollowViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 # ---------------------------
 
 class RivenditaViewSet(viewsets.ModelViewSet):
-    queryset = Rivendita.objects.select_related("evento", "venditore", "biglietto").all()
+    queryset = Rivendita.objects.select_related("evento", "venditore", "biglietto").prefetch_related("subitems").all()
     serializer_class = RivenditaSerializer
     permission_classes = [IsAdminOrReadOnly]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if getattr(self, "swagger_fake_view", False):
+            return qs
+        # Per utenti non autenticati o non staff, mostra solo rivendite pubblicate e disponibili
+        if not self.request.user.is_staff:
+            qs = qs.filter(status="PUBLISHED", disponibile=True)
+        return qs
 
 
 class AcquistoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
@@ -755,6 +764,13 @@ class PerformanceViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ["evento", "luogo", "status", "disponibilita_agg"]
     ordering_fields = ["starts_at_utc", "prezzo_min", "prezzo_max"]
     ordering = ["starts_at_utc"]
+
+    def get_queryset(self):
+        """
+        Filtra le performance per escludere quelle con data passata.
+        """
+        now = dj_timezone.now()
+        return self.queryset.filter(starts_at_utc__gte=now)
 
     @action(detail=True, methods=["get"], permission_classes=[permissions.AllowAny])
     def listings(self, request, pk=None):
@@ -845,6 +861,52 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
         ser.is_valid(raise_exception=True)
         out = ser.save()
         return Response(out, status=200)
+
+    @action(detail=True, methods=["post"], url_path="cancel", permission_classes=[IsAuthenticated])
+    def cancel_listing(self, request, pk=None):
+        """
+        POST /api/listings/{id}/cancel/
+        Cancella un listing: lo marca come CANCELLED e libera i sub-ticket non ancora venduti.
+        """
+        listing = self.get_object()
+        if not (request.user.is_staff or listing.seller_id == request.user.id):
+            return Response({"detail": "not allowed"}, status=403)
+        
+        if listing.status == "CANCELLED":
+            return Response({"detail": "listing gia annullato"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if listing.status == "SOLD":
+            return Response({"detail": "non puoi annullare un listing completamente venduto"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        from django.db import transaction
+        with transaction.atomic():
+            # Marca il listing come CANCELLED
+            listing.status = "CANCELLED"
+            listing.save(update_fields=["status"])
+            
+            # Libera i sub-ticket non ancora venduti
+            for sub in listing.subitems.filter(subitem__is_sold=False):
+                sub.subitem.is_listed = False
+                sub.subitem.save(update_fields=["is_listed"])
+        
+        return Response({
+            "listing_id": listing.id,
+            "status": listing.status,
+            "message": "Annuncio revocato. I biglietti non venduti sono stati liberati."
+        }, status=status.HTTP_200_OK)
+
+    @swagger_auto_schema(request_body=ListingSelectionUpdateSerializer, tags=["Listings"])
+    @action(detail=True, methods=["post"], url_path="update-selection", permission_classes=[IsAuthenticated])
+    def update_selection(self, request, pk=None):
+        listing = self.get_object()
+        ser = ListingSelectionUpdateSerializer(
+            data=request.data,
+            context={"request": request, "listing": listing},
+        )
+        ser.is_valid(raise_exception=True)
+        out = ser.save()
+        return Response(out, status=status.HTTP_200_OK)
+
     def get_queryset(self):
         return (
             Listing.objects
@@ -1274,7 +1336,7 @@ class MyPurchasesView(generics.ListAPIView):
 
 class TicketUploadViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @swagger_auto_schema(request_body=TicketUploadPDFSerializer, tags=["Upload biglietti"])
     @action(detail=False, methods=["post"], url_path="pdf")
