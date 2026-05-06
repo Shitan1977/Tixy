@@ -917,11 +917,33 @@ class BigliettoDetailSerializer(serializers.ModelSerializer):
 # --- 2C) Review dell'UPLOAD (aggregato) ---
 class TicketUploadReviewSerializer(serializers.ModelSerializer):
     biglietto_info = serializers.SerializerMethodField()
-    subitems = TicketSubitemMiniSerializer(source="biglietto.subitems", many=True, read_only=True)
+    subitems = serializers.SerializerMethodField()
 
     class Meta:
         model = TicketUpload
         fields = ("id", "status", "found_count", "selectable_count", "error_message", "biglietto_info", "subitems")
+
+    def get_subitems(self, obj):
+        items = []
+        for row in (obj.extracted_subitems or []):
+            raw = (row.get("code_raw") or "").strip()
+            if raw and len(raw) > 6:
+                masked = ("*" * max(0, len(raw) - 6)) + raw[-6:]
+            else:
+                masked = raw or None
+            items.append(
+                {
+                    "id": int(row.get("id") or 0),
+                    "full_name": row.get("full_name"),
+                    "price": row.get("price"),
+                    "page": row.get("page"),
+                    "code_type": row.get("code_type"),
+                    "code_value": masked,
+                    "is_listed": False,
+                    "is_sold": False,
+                }
+            )
+        return items
 
     def get_biglietto_info(self, obj):
         b = obj.biglietto
@@ -966,13 +988,12 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
     notes = serializers.CharField(allow_blank=True, required=False)
     performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all(), required=False, allow_null=True)
 
-    def _has_active_identifier_conflict(self, upload: TicketUpload, selected_subitems):
+    def _has_active_identifier_conflict(self, upload: TicketUpload, selected_code_hashes):
         sigillo = upload.biglietto.sigillo_fiscale
-        code_hashes = list(selected_subitems.values_list("code_hash", flat=True))
         active = Listing.objects.filter(status__in=["ACTIVE", "RESERVED"])
         if sigillo and active.filter(subitems__subitem__biglietto__sigillo_fiscale=sigillo).exists():
             return True
-        if code_hashes and active.filter(subitems__subitem__code_hash__in=code_hashes).exists():
+        if selected_code_hashes and active.filter(subitems__subitem__code_hash__in=selected_code_hashes).exists():
             return True
         return False
 
@@ -986,42 +1007,59 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
         if not upload.biglietto.is_valid:
             raise serializers.ValidationError("biglietto non valido")
 
-        qs = TicketSubitem.objects.filter(
-            id__in=attrs["subitem_ids"], biglietto=upload.biglietto, is_listed=False
-        )
-        if qs.count() != len(attrs["subitem_ids"]):
+        extracted = upload.extracted_subitems or []
+        extracted_by_id = {
+            int(item.get("id")): item
+            for item in extracted
+            if item.get("id") is not None
+        }
+        selected_ids = list(dict.fromkeys(attrs["subitem_ids"]))
+        if any(subitem_id not in extracted_by_id for subitem_id in selected_ids):
             raise serializers.ValidationError("some selected tickets are not available")
+
+        selected_items = [extracted_by_id[subitem_id] for subitem_id in selected_ids]
 
         perf = attrs.get("performance") or getattr(upload.biglietto, "performance", None)
         if perf is None:
             raise serializers.ValidationError("performance mancante: passala nel payload o associane una al biglietto")
         if perf.starts_at_utc <= timezone.now():
             raise serializers.ValidationError("non puoi rivendere biglietti per eventi gia passati")
-        if self._has_active_identifier_conflict(upload, qs):
+
+        selected_code_hashes = [item.get("code_hash") for item in selected_items if item.get("code_hash")]
+        if self._has_active_identifier_conflict(upload, selected_code_hashes):
             raise serializers.ValidationError("sigillo fiscale o barcode gia in vendita")
 
         requested_price = attrs.get("price_each")
-        price_caps = [item.price for item in qs if item.price is not None]
+        price_caps = []
+        for item in selected_items:
+            raw_price = item.get("price")
+            if raw_price in (None, ""):
+                continue
+            try:
+                price_caps.append(Decimal(str(raw_price)))
+            except Exception:
+                continue
         if requested_price is not None and price_caps:
             max_allowed = min(price_caps)
             if requested_price > max_allowed:
                 raise serializers.ValidationError({"price_each": f"il prezzo massimo consentito e {max_allowed}"})
 
         attrs["_upload"] = upload
-        attrs["_subitems_qs"] = qs
+        attrs["_selected_items"] = selected_items
         attrs["_performance"] = perf
         return attrs
 
     def create(self, validated_data):
-        sub_qs = validated_data["_subitems_qs"]
+        selected_items = validated_data["_selected_items"]
         performance = validated_data["_performance"]
+        upload = validated_data["_upload"]
         user = self.context["request"].user
 
         with transaction.atomic():
             listing = Listing.objects.create(
                 seller=user,
                 performance=performance,
-                qty=sub_qs.count(),
+                qty=len(selected_items),
                 price_each=validated_data["price_each"],
                 currency=validated_data["currency"],
                 delivery_method=validated_data["delivery_method"],
@@ -1029,7 +1067,27 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 notes=validated_data.get("notes") or "",
                 status="ACTIVE",
             )
-            for sbi in sub_qs.select_for_update():
+
+            for item in selected_items:
+                raw_code = (item.get("code_raw") or "").strip()
+                code_hash = item.get("code_hash")
+                if not raw_code or not code_hash:
+                    raise serializers.ValidationError("dati ticket incompleti, riprova il caricamento")
+
+                sbi, _ = TicketSubitem.objects.select_for_update().get_or_create(
+                    code_hash=code_hash,
+                    defaults=dict(
+                        biglietto=upload.biglietto,
+                        full_name=item.get("full_name"),
+                        price=item.get("price") or None,
+                        page=item.get("page"),
+                        code_type=item.get("code_type"),
+                        code_raw=raw_code,
+                    ),
+                )
+                if sbi.is_listed:
+                    raise serializers.ValidationError("alcuni biglietti sono gia in vendita")
+
                 ListingSubitem.objects.create(listing=listing, subitem=sbi)
                 sbi.is_listed = True
                 if hasattr(sbi, "listed_at"):

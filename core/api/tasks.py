@@ -10,7 +10,7 @@ from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Biglietto, Performance, TicketSubitem, TicketUpload
+from .models import Biglietto, Performance, TicketUpload
 
 # --- helper sicuri: nessuna dipendenza hard obbligatoria ---
 try:
@@ -259,6 +259,59 @@ def _build_ticket_rows(text: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def _serialize_subitems_for_upload(rows: List[Dict[str, Any]], codes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Produce subitems temporanei per la review senza persistere TicketSubitem prima del confirm.
+    """
+    temp_rows: List[Dict[str, Any]] = []
+    seen_hashes = set()
+
+    for row in rows:
+        raw = (row.get("code_raw") or "").strip()
+        if not raw:
+            continue
+        code_hash = _safe_sha256(raw.encode("utf-8"))
+        if code_hash in seen_hashes:
+            continue
+        seen_hashes.add(code_hash)
+        temp_rows.append(
+            {
+                "id": len(temp_rows) + 1,
+                "page": row.get("page"),
+                "code_type": row.get("code_type") or "CODE",
+                "code_raw": raw,
+                "code_hash": code_hash,
+                "full_name": row.get("full_name"),
+                "price": str(row.get("price")) if row.get("price") is not None else None,
+            }
+        )
+
+    if temp_rows:
+        return temp_rows
+
+    for code in codes or []:
+        raw = (code.get("code_raw") or "").strip()
+        if not raw:
+            continue
+        code_hash = _safe_sha256(raw.encode("utf-8"))
+        if code_hash in seen_hashes:
+            continue
+        seen_hashes.add(code_hash)
+        temp_rows.append(
+            {
+                "id": len(temp_rows) + 1,
+                "page": code.get("page"),
+                "code_type": code.get("code_type") or "CODE",
+                "code_raw": raw,
+                "code_hash": code_hash,
+                "full_name": None,
+                "price": None,
+            }
+        )
+
+    return temp_rows
+
+
 def _find_matching_performance(event_name: str, venue: str, event_dt: datetime):
     if not event_name or not venue or not event_dt:
         return None
@@ -400,48 +453,12 @@ def parse_ticket_pdf(self, upload_id: int):
             "sigilli": [row.get("sigillo") for row in ticket_rows if row.get("sigillo")],
         }
 
-        sub_created = 0
+        parsed_subitems = _serialize_subitems_for_upload(ticket_rows, codes)
         with transaction.atomic():
-            # crea subitems da codici
-            for c in codes or []:
-                raw = c["code_raw"].strip()
-                code_hash = _safe_sha256(raw.encode("utf-8"))
-                obj, created = TicketSubitem.objects.get_or_create(
-                    code_hash=code_hash,
-                    defaults=dict(
-                        biglietto=big,
-                        full_name=(big.extracted_names or [None])[0],
-                        price=(big.extracted_prices or [None])[0],
-                        page=c.get("page"),
-                        code_type=c.get("code_type"),
-                        code_raw=raw,
-                    ),
-                )
-                sub_created += 1 if created else 0
-
-            if sub_created == 0:
-                for row in ticket_rows:
-                    raw = (row.get("code_raw") or "").strip()
-                    if not raw:
-                        continue
-                    code_hash = _safe_sha256(raw.encode("utf-8"))
-                    _, created = TicketSubitem.objects.get_or_create(
-                        code_hash=code_hash,
-                        defaults=dict(
-                            biglietto=big,
-                            full_name=row.get("full_name"),
-                            price=row.get("price"),
-                            page=row.get("page"),
-                            code_type=row.get("code_type"),
-                            code_raw=raw,
-                        ),
-                    )
-                    sub_created += 1 if created else 0
-
             # aggiorna big + upload
-            total = big.subitems.count()
+            total = len(parsed_subitems)
             if total == 0 and (codes or ticket_rows):
-                raise RuntimeError("biglietto gia caricato o identificativo gia presente")
+                raise RuntimeError("nessun identificativo ticket valido trovato")
 
             big.tickets_found = total
             big.is_valid = bool(total and perf)
@@ -449,6 +466,7 @@ def parse_ticket_pdf(self, upload_id: int):
 
             upload.found_count = total
             upload.selectable_count = total
+            upload.extracted_subitems = parsed_subitems
             upload.status = "READY" if big.is_valid else "ERROR"
             upload.error_message = None if big.is_valid else "Dati ticket insufficienti o evento non riconosciuto"
             upload.save()

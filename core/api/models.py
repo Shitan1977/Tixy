@@ -654,6 +654,7 @@ class TicketUpload(models.Model):
     status = models.CharField(max_length=10, choices=STATUS, default="PARSING")
     found_count = models.IntegerField(default=0)
     selectable_count = models.IntegerField(default=0)
+    extracted_subitems = models.JSONField(default=list, blank=True)
     error_message = models.TextField(blank=True, null=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
