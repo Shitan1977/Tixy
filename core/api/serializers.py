@@ -985,6 +985,7 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
     currency = serializers.CharField(max_length=3, default="EUR")
     delivery_method = serializers.ChoiceField(choices=Listing.DELIVERY, default="PDF")
     change_name_required = serializers.BooleanField(default=False)
+    is_top = serializers.BooleanField(default=False)
     notes = serializers.CharField(allow_blank=True, required=False)
     performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all(), required=False, allow_null=True)
 
@@ -1064,6 +1065,7 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 currency=validated_data["currency"],
                 delivery_method=validated_data["delivery_method"],
                 change_name_required=validated_data.get("change_name_required", False),
+                is_top=validated_data.get("is_top", False),
                 notes=validated_data.get("notes") or "",
                 status="ACTIVE",
             )
