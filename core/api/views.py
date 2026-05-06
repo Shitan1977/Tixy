@@ -46,11 +46,19 @@ from .serializers import (
 from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
     Piattaforma, EventoPiattaforma, Sconti, AlertPlan, Abbonamento, Monitoraggio,
-    Notifica, Biglietto, Rivendita, Acquisto, Listing, OrderTicket, Recensione,
+    Notifica, Biglietto, Rivendita, Acquisto, Listing, ListingSubitem, ListingTicket,
+    OrderTicket, Recensione,
     TicketUpload, SupportTicket, SupportMessage, SupportAttachment, EventFollow
 )
 
 User = get_user_model()
+
+
+def _available_listing_qty(listing: Listing) -> int:
+    unsold_count = listing.subitems.filter(subitem__is_sold=False).count()
+    if unsold_count == 0 and not listing.subitems.exists():
+        return int(listing.qty or 0)
+    return unsold_count
 
 
 # ---------------------------
@@ -937,8 +945,9 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"qty": "must be >= 1"}, status=status.HTTP_400_BAD_REQUEST)
         if listing.status != "ACTIVE":
             return Response({"detail": "listing not active"}, status=status.HTTP_400_BAD_REQUEST)
-        if qty > listing.qty:
-            return Response({"qty": f"exceeds listing qty ({listing.qty} available)"},
+        available_qty = _available_listing_qty(listing)
+        if qty > available_qty:
+            return Response({"qty": f"exceeds listing qty ({available_qty} available)"},
                             status=status.HTTP_400_BAD_REQUEST)
 
         unit = listing.price_each
@@ -969,7 +978,7 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
             "commission": str(commission),
             "total": str(total),
             "delivery_method": listing.delivery_method,
-            "available_qty": listing.qty,
+            "available_qty": available_qty,
         }, status=status.HTTP_200_OK)
 
 
@@ -1006,11 +1015,12 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 
         with transaction.atomic():
             listing = get_object_or_404(Listing.objects.select_for_update(), pk=listing_id)
+            available_qty = _available_listing_qty(listing)
 
             if listing.status != "ACTIVE":
                 return Response({"detail": "listing not active"}, status=status.HTTP_400_BAD_REQUEST)
-            if qty > listing.qty:
-                return Response({"qty": f"exceeds listing qty ({listing.qty} available)"},
+            if qty > available_qty:
+                return Response({"qty": f"exceeds listing qty ({available_qty} available)"},
                                 status=status.HTTP_400_BAD_REQUEST)
 
             unit_price = listing.price_each
@@ -1027,7 +1037,7 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
                 status="PENDING",  # poi passerà a PAID dopo il pagamento
             )
 
-            remaining = listing.qty - qty
+            remaining = available_qty - qty
             if remaining > 0:
                 listing.qty = remaining
                 listing.save(update_fields=["qty", "updated_at"])
@@ -1044,31 +1054,52 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     def download(self, request, pk=None):
         """
         GET /api/orders/{id}/download/
-        Ritorna (o reindirizza a) una URL temporanea per scaricare il biglietto.
+        Serve il PDF del biglietto direttamente.
         Sicurezza: solo il buyer (o staff) può scaricare.
         """
+        import mimetypes as _mimetypes
+        from django.http import FileResponse, HttpResponseNotFound
+
         order = self.get_object()
 
         if not (request.user.is_staff or order.buyer_id == request.user.id):
             raise PermissionDenied("not allowed")
 
-        # TODO: sostituisci questa parte con la tua logica di storage (filesystem/S3/signed URL)
-        ticket_file_path = None
+        # Cerca il Biglietto tramite ListingTicket (relazione principale)
+        biglietto = None
+        lt = (
+            ListingTicket.objects
+            .filter(listing=order.listing)
+            .select_related("biglietto")
+            .first()
+        )
+        if lt and lt.biglietto and lt.biglietto.path_file:
+            biglietto = lt.biglietto
 
-        # Esempio: se il Listing ha un campo file
-        if hasattr(order.listing, "ticket_file") and order.listing.ticket_file:
-            ticket_file_path = order.listing.ticket_file.name
+        # Fallback: tramite ListingSubitem → TicketSubitem → Biglietto
+        if biglietto is None:
+            lsi = (
+                ListingSubitem.objects
+                .filter(listing=order.listing)
+                .select_related("subitem__biglietto")
+                .first()
+            )
+            if lsi and lsi.subitem and lsi.subitem.biglietto and lsi.subitem.biglietto.path_file:
+                biglietto = lsi.subitem.biglietto
 
-        # Esempio alternativo: se hai un Biglietto collegato all'ordine
-        # biglietto = getattr(order, "biglietto", None)
-        # if biglietto and biglietto.path_file:
-        #     ticket_file_path = biglietto.path_file.name
-
-        if not ticket_file_path:
+        if biglietto is None or not biglietto.path_file:
             raise NotFound("ticket not available yet")
 
-        # Placeholder: ritorna una URL di download protetta
-        return Response({"url": f"/protected-download/{ticket_file_path}"}, status=200)
+        try:
+            f = biglietto.path_file.open("rb")
+        except Exception:
+            raise NotFound("ticket file not found on server")
+
+        filename = biglietto.nome_file or f"biglietto_{order.id}.pdf"
+        mime = biglietto.mime_type or _mimetypes.guess_type(filename)[0] or "application/pdf"
+        resp = FileResponse(f, content_type=mime)
+        resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
 
 
 # ---------------------------
@@ -1125,10 +1156,11 @@ class CheckoutStartView(APIView):
         # 2) crea ordine PENDING in modo atomico e scala qty
         with transaction.atomic():
             locked = Listing.objects.select_for_update().get(pk=listing.pk)
+            available_qty = _available_listing_qty(locked)
             if locked.status != "ACTIVE":
                 return Response({"detail": "listing not active"}, status=status.HTTP_400_BAD_REQUEST)
-            if qty > locked.qty:
-                return Response({"qty": f"exceeds listing qty ({locked.qty} available)"},
+            if qty > available_qty:
+                return Response({"qty": f"exceeds listing qty ({available_qty} available)"},
                                 status=status.HTTP_400_BAD_REQUEST)
 
             unit_price = locked.price_each

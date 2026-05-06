@@ -129,9 +129,18 @@ class OTPVerificationSerializer(serializers.Serializer):
 
 
 class ShortUserProfileSerializer(serializers.ModelSerializer):
+    display_name = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ("id", "first_name", "last_name")
+        fields = ("id", "first_name", "last_name", "display_name")
+
+    def get_display_name(self, obj):
+        first = (obj.first_name or "").strip()
+        last = (obj.last_name or "").strip()
+        if first and last:
+            return f"{first} {last[0]}."
+        return first or last or None
 
 
 # ============ CATALOGO / PIATTAFORME ============
@@ -431,6 +440,7 @@ class ListingCardSerializer(serializers.ModelSerializer):
     seller_info = ShortUserProfileSerializer(source="seller", read_only=True)
     seller_reviews_count = serializers.IntegerField(read_only=True)
     seller_rating_avg = serializers.DecimalField(max_digits=3, decimal_places=2, read_only=True)
+    qty = serializers.SerializerMethodField()
     total_price = serializers.SerializerMethodField()
     public_subitems = serializers.SerializerMethodField()
 
@@ -457,9 +467,16 @@ class ListingCardSerializer(serializers.ModelSerializer):
 
     def get_total_price(self, obj):
         try:
-            return (obj.price_each or 0) * (obj.qty or 0)
+            return (obj.price_each or 0) * (self.get_qty(obj) or 0)
         except Exception:
             return None
+
+    def get_qty(self, obj):
+        unsold_qs = obj.subitems.filter(subitem__is_sold=False)
+        unsold_count = unsold_qs.count()
+        if unsold_count == 0 and not obj.subitems.exists():
+            return obj.qty or 0
+        return unsold_count
 
     def get_public_subitems(self, obj):
         qs = (
@@ -486,14 +503,14 @@ class RivenditaSerializer(serializers.ModelSerializer):
                   "subitems", "subitems_list", "url", "prezzo", "qty", "disponibile", "status", "creato_il", "aggiornato_il")
 
     def get_venditore_nome_iniziale(self, obj):
-        """Formatta il nome come 'M. Rossi' (prima lettera nome + punto + cognome)"""
+        """Formatta il nome come 'Mario R.' (nome + iniziale cognome + punto)"""
         if not obj.venditore:
             return None
         first_name = (obj.venditore.first_name or "").strip()
         last_name = (obj.venditore.last_name or "").strip()
-        if not first_name or not last_name:
-            return None
-        return f"{first_name[0]}. {last_name}"
+        if first_name and last_name:
+            return f"{first_name} {last_name[0]}."
+        return first_name or last_name or None
 
     def get_subitems_list(self, obj):
         """Serializza i subitems con TicketSubitemMiniSerializer"""
@@ -502,7 +519,8 @@ class RivenditaSerializer(serializers.ModelSerializer):
 
     def get_qty(self, obj):
         """Numero di biglietti disponibili per questa rivendita"""
-        return obj.subitems.count()
+        count = obj.subitems.count()
+        return count if count > 0 else 1
 
 
 class AcquistoSerializer(serializers.ModelSerializer):
@@ -1216,6 +1234,7 @@ class ListingSelectionUpdateSerializer(serializers.Serializer):
 class MyResaleListItemSerializer(serializers.ModelSerializer):
     performance_info = PerformanceMiniSerializer(source="performance", read_only=True)
     seller_info = ShortUserProfileSerializer(source="seller", read_only=True)
+    qty = serializers.SerializerMethodField()
     download_url = serializers.SerializerMethodField()
     sold_qty = serializers.SerializerMethodField()
     is_fully_sold = serializers.SerializerMethodField()
@@ -1250,7 +1269,14 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
         return obj.subitems.filter(subitem__is_sold=True).count()
 
     def get_is_fully_sold(self, obj):
-        return obj.status == "SOLD" or (obj.qty or 0) <= 0
+        return obj.status == "SOLD" or (self.get_qty(obj) or 0) <= 0
+
+    def get_qty(self, obj):
+        unsold_qs = obj.subitems.filter(subitem__is_sold=False)
+        unsold_count = unsold_qs.count()
+        if unsold_count == 0 and not obj.subitems.exists():
+            return obj.qty or 0
+        return unsold_count
 
     def get_change_name_required(self, obj):
         """
