@@ -669,6 +669,7 @@ class Listing(models.Model):
     STATUS = [("ACTIVE","ACTIVE"),("RESERVED","RESERVED"),("SOLD","SOLD"),("CANCELLED","CANCELLED"),("EXPIRED","EXPIRED")]
 
     is_top = models.BooleanField(default=False, db_index=True)
+    is_pro = models.BooleanField(default=False)
     seller = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="listings")
     performance = models.ForeignKey(Performance, on_delete=models.CASCADE, related_name="listings")
 

@@ -1066,6 +1066,7 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 delivery_method=validated_data["delivery_method"],
                 change_name_required=validated_data.get("change_name_required", False),
                 is_top=validated_data.get("is_top", False),
+                is_pro=validated_data.get("is_top", False),
                 notes=validated_data.get("notes") or "",
                 status="ACTIVE",
             )
