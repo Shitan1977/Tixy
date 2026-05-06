@@ -1040,7 +1040,7 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
             except Exception:
                 continue
         if requested_price is not None and price_caps:
-            max_allowed = min(price_caps)
+            max_allowed = min(price_caps) - Decimal("0.50")
             if requested_price > max_allowed:
                 raise serializers.ValidationError({"price_each": f"il prezzo massimo consentito e {max_allowed}"})
 
@@ -1152,7 +1152,7 @@ class ListingSelectionUpdateSerializer(serializers.Serializer):
 
         price_caps = [item.price for item in selected_qs if item.price is not None]
         if price_caps:
-            max_allowed = min(price_caps)
+            max_allowed = min(price_caps) - Decimal("0.50")
             if listing.price_each > max_allowed:
                 raise serializers.ValidationError(
                     {"subitem_ids": f"il prezzo del listing supera il massimo consentito di {max_allowed}"}
