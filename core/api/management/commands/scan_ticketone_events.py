@@ -1,7 +1,8 @@
 from django.core.management.base import BaseCommand
 
-from api.scrapers.ticketone.importer import import_ticketone_item
+from api.scrapers.ticketone.importer import import_ticketone_item, parse_starts_at, normalize_text
 from api.scrapers.ticketone.runner import TicketOneScraper
+from api.services.performance_matching import find_matching_performances
 
 
 class Command(BaseCommand):
@@ -11,11 +12,18 @@ class Command(BaseCommand):
         parser.add_argument("--limit", type=int, default=10)
         parser.add_argument("--verbose", action="store_true")
         parser.add_argument("--dry-run", action="store_true")
+        parser.add_argument(
+            "--match-dry-run",
+            action="store_true",
+            help="Mostra se gli eventi TicketOne avrebbero match con performance già esistenti, senza salvare nulla."
+        )
+
 
     def handle(self, *args, **options):
         limit = options["limit"]
         verbose = options["verbose"]
         dry_run = options["dry_run"]
+        match_dry_run = options["match_dry_run"]
 
         scraper = TicketOneScraper(verbose=verbose)
 
@@ -40,6 +48,45 @@ class Command(BaseCommand):
                 f"date={item.starts_at_raw} | price={item.price_text} | "
                 f"external_id={item.external_id} | detail_status={item.detail_status} | source={item.source}"
             )
+
+            if match_dry_run:
+                starts_at_utc = parse_starts_at(item.starts_at_raw)
+                city = normalize_text(item.city)
+
+                if not starts_at_utc:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"  [MATCH SKIP] data non valida title={item.title} raw_date={item.starts_at_raw}"
+                        )
+                    )
+                else:
+                    matches = find_matching_performances(
+                        event_name=item.title,
+                        starts_at_utc=starts_at_utc,
+                        city=city or None,
+                        hours_window=12,
+                        min_similarity=0.80,
+                    )
+
+                    if matches:
+                        best = matches[0]
+                        p = best["performance"]
+
+                        self.stdout.write(
+                            self.style.SUCCESS(
+                                f"  [MATCH FOUND] score={best['score']:.3f} "
+                                f"existing_perf={p.id} existing_event={p.evento_id} "
+                                f"existing_name={p.evento.nome_evento} "
+                                f"existing_city={p.luogo.citta if p.luogo else '-'} "
+                                f"existing_date={p.starts_at_utc}"
+                            )
+                        )
+                    else:
+                        self.stdout.write(
+                            self.style.WARNING(
+                                "  [MATCH MISS] nessuna performance esistente compatibile"
+                            )
+                        )
 
             if dry_run:
                 continue

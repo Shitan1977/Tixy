@@ -18,7 +18,7 @@ from api.models import (
 )
 
 from .schemas import TicketOneEventItem
-
+from api.services.performance_matching import find_best_matching_performance
 
 ROME_TZ = ZoneInfo("Europe/Rome")
 
@@ -163,9 +163,37 @@ def get_or_create_evento(item: TicketOneEventItem, categoria: Optional[Categoria
 
 
 def get_or_create_performance(evento: Evento, luogo: Optional[Luoghi], item: TicketOneEventItem) -> Optional[Performance]:
+    """
+    Crea o recupera una Performance per TicketOne.
+
+    Logica nuova e conservativa:
+    1. calcola data/ora evento
+    2. cerca una performance compatibile già esistente nel DB
+       usando nome + data + città
+    3. se la trova, la riusa
+    4. se non la trova, mantiene il comportamento precedente
+
+    Questo permette allo scanner generico di ragionare per performance
+    e non per piattaforma.
+    """
+
     starts_at_utc = parse_starts_at(item.starts_at_raw)
     if not starts_at_utc or not luogo:
         return None
+
+    city = normalize_text(item.city)
+
+    matched_perf = find_best_matching_performance(
+        event_name=normalize_text(item.title),
+        starts_at_utc=starts_at_utc,
+        city=city or None,
+        hours_window=12,
+        max_time_diff_hours=2,
+        min_similarity=0.80,
+    )
+
+    if matched_perf:
+        return matched_perf
 
     performance = Performance.objects.filter(
         evento=evento,
@@ -213,6 +241,12 @@ def import_ticketone_item(item: TicketOneEventItem) -> dict:
     luogo = get_or_create_luogo(item)
     evento = get_or_create_evento(item, categoria)
     performance = get_or_create_performance(evento, luogo, item)
+
+    # Se la performance trovata appartiene a un evento già esistente
+    # proveniente da un'altra piattaforma, usiamo quell'evento come riferimento.
+    # Così EventoPiattaforma TicketOne viene collegato all'evento corretto.
+    if performance and performance.evento_id != evento.id:
+        evento = performance.evento
 
     ep_defaults = {
         "url": item.event_url,

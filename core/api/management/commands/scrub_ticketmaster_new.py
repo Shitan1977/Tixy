@@ -32,7 +32,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from api.models import Piattaforma, Luoghi, Evento, Performance, EventoPiattaforma
-
+from api.services.performance_matching import find_best_matching_performance
 
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -67,6 +67,12 @@ class Command(BaseCommand):
         parser.add_argument("--include-tbd", action="store_true", default=True)
 
         parser.add_argument("--progress-every", type=int, default=50)
+        parser.add_argument(
+            "--match-dry-run",
+            action="store_true",
+            help="Mostra eventuali match con performance già esistenti, senza salvare nulla."
+        )
+
 
     def unique_slug(self, base_slug: str, *, exclude_pk=None) -> str:
         base_slug = (base_slug or "").strip("-") or "evento"
@@ -96,6 +102,7 @@ class Command(BaseCommand):
         include_tbd = bool(options["include_tbd"])
 
         progress_every = max(1, int(options["progress_every"] or 50))
+        match_dry_run = bool(options["match_dry_run"])
 
         self.stdout.write(self.style.SUCCESS("=== SCRUB TICKETMASTER NEW START ==="))
         self.stdout.write(f"Time: {timezone.now().isoformat()}")
@@ -174,6 +181,48 @@ class Command(BaseCommand):
                         f"[DRY] {tm_id} | {name} | starts_at_utc={starts_at_utc} | "
                         f"local={local_date} {local_time} | {venue_name} ({city},{country_code})"
                     )
+
+                    if match_dry_run:
+                        match_starts = starts_at_utc
+
+                        if match_starts is None and local_date:
+                            match_starts = datetime.fromisoformat(local_date).replace(
+                                hour=0, minute=0, second=0, microsecond=0, tzinfo=dt_tz.utc
+                            )
+
+                        if not match_starts:
+                            self.stdout.write(
+                                self.style.WARNING(
+                                    f"  [MATCH SKIP] data assente tm_id={tm_id} name={name}"
+                                )
+                            )
+                        else:
+                            matched_perf = find_best_matching_performance(
+                                event_name=name,
+                                starts_at_utc=match_starts,
+                                city=city or None,
+                                hours_window=12,
+                                min_similarity=0.80,
+                                max_time_diff_hours=2,
+                            )
+
+                            if matched_perf:
+                                self.stdout.write(
+                                    self.style.SUCCESS(
+                                        f"  [MATCH FOUND] existing_perf={matched_perf.id} "
+                                        f"existing_event={matched_perf.evento_id} "
+                                        f"existing_name={matched_perf.evento.nome_evento} "
+                                        f"existing_city={matched_perf.luogo.citta if matched_perf.luogo else '-'} "
+                                        f"existing_date={matched_perf.starts_at_utc}"
+                                    )
+                                )
+                            else:
+                                self.stdout.write(
+                                    self.style.WARNING(
+                                        "  [MATCH MISS] nessuna performance esistente compatibile"
+                                    )
+                                )
+
                     processed += 1
                     if processed % progress_every == 0:
                         self.stdout.write(f"...progress(dry): {processed}")
@@ -275,6 +324,8 @@ class Command(BaseCommand):
 
                         # --- PERFORMANCE (robusta) ---
                         # Mai saltare se abbiamo localDate.
+                        # --- PERFORMANCE (robusta + cross-platform matching) ---
+                        # Mai saltare se abbiamo localDate.
                         perf_starts = starts_at_utc
                         perf_status = "UNKNOWN"
                         perf_dispo = None
@@ -292,28 +343,58 @@ class Command(BaseCommand):
                                 processed += 1
                                 continue
 
-                        perf, perf_created = Performance.objects.get_or_create(
-                            evento=evento,
-                            luogo=luogo,
+                        matched_perf = find_best_matching_performance(
+                            event_name=name,
                             starts_at_utc=perf_starts,
-                            defaults={
-                                "status": perf_status,
-                                "disponibilita_agg": perf_dispo or "sconosciuta",
-                                "valuta": "EUR",
-                            },
+                            city=city or None,
+                            hours_window=12,
+                            min_similarity=0.80,
                         )
+
+                        if matched_perf:
+                            perf = matched_perf
+                            perf_created = False
+
+                            # Se il match appartiene a un evento già esistente di un'altra piattaforma,
+                            # usiamo quell'evento come riferimento.
+                            if perf.evento_id != evento.id:
+                                evento = perf.evento
+
+                                # Aggiorniamo anche il mapping Ticketmaster per puntare all'evento corretto.
+                                EventoPiattaforma.objects.filter(
+                                    piattaforma=plat,
+                                    id_evento_piattaforma=tm_id,
+                                ).update(evento=evento, aggiornato_il=timezone.now())
+
+                        else:
+                            perf, perf_created = Performance.objects.get_or_create(
+                                evento=evento,
+                                luogo=luogo,
+                                starts_at_utc=perf_starts,
+                                defaults={
+                                    "status": perf_status,
+                                    "disponibilita_agg": perf_dispo or "sconosciuta",
+                                    "valuta": "EUR",
+                                },
+                            )
 
                         if perf_created:
                             created_perf += 1
+
+                            changed_perf = False
+
                             if perf_dispo == "time_tbd":
                                 if perf.disponibilita_agg != "time_tbd":
                                     perf.disponibilita_agg = "time_tbd"
                                     changed_perf = True
-                                if perf.status != "TIME_TBD":
-                                    perf.status = "TIME_TBD"
-                                    changed_perf = True
 
+                                # Attenzione: lasciamo status invariato perché il model Performance
+                                # ammette solo ONSALE, SOLD_OUT, POSTPONED, CANCELLED, ENDED.
+                                # "TIME_TBD" non è tra le choices.
                                 perf_time_tbd_marked += 1
+
+                            if changed_perf:
+                                perf.save(update_fields=["disponibilita_agg", "aggiornato_il"])
                         else:
                             changed_perf = False
                             if perf_dispo == "time_tbd" and perf.disponibilita_agg != "time_tbd":

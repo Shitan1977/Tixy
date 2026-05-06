@@ -279,22 +279,38 @@ def check_ticketmaster_page_availability(
             "Upgrade-Insecure-Requests": "1",
         }
 
-    # keyword (lowercase match)
     negatives = [
         "sold out",
         "esaurito",
         "non disponibile",
+        "non è disponibile",
+        "biglietti non disponibili",
+        "biglietto non disponibile",
+        "attualmente non disponibile",
         "tickets not available",
         "no tickets available",
+        "not available",
     ]
-    positives = [
-        "acquista",
-        "buy tickets",
+
+    # Segnali forti: indicano molto più probabilmente una reale possibilità di acquisto.
+    strong_positives = [
         "aggiungi al carrello",
-        "on sale",
+        "procedi all'acquisto",
+        "procedi con l'acquisto",
+        "checkout",
+        "seleziona biglietti",
+        "select tickets",
+        "buy tickets",
+    ]
+
+    # Segnali deboli: da soli NON bastano.
+    # Li teniamo come informazione, ma non li trasformiamo in available.
+    weak_positives = [
+        "acquista",
         "in vendita",
+        "on sale",
         "rivendita",
-		"isResale",
+        "isresale",
     ]
 
     last_exc: Optional[str] = None
@@ -357,13 +373,22 @@ def check_ticketmaster_page_availability(
                     "reason": "negative_keyword",
                 }
 
-            if any(k in text for k in positives):
+            if any(k in text for k in strong_positives):
                 return {
                     "ok": True,
                     "availability": "available",
                     "status_code": r.status_code,
                     "final_url": last_final_url,
-                    "reason": "positive_keyword",
+                    "reason": "strong_positive_keyword",
+                }
+
+            if any(k in text for k in weak_positives):
+                return {
+                    "ok": True,
+                    "availability": "unknown",
+                    "status_code": r.status_code,
+                    "final_url": last_final_url,
+                    "reason": "weak_positive_keyword_ignored",
                 }
 
             return {
