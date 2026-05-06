@@ -1050,6 +1050,42 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
+    @action(detail=True, methods=["post"], url_path="confirm-payment", permission_classes=[permissions.IsAuthenticated])
+    def confirm_payment(self, request, pk=None):
+        """
+        POST /api/orders/{id}/confirm-payment/
+        Segna l'ordine come PAID + DELIVERED, i TicketSubitem come is_sold,
+        il Listing come SOLD. Usato dal frontend dopo pagamento simulato o webhook.
+        """
+        order = self.get_object()
+
+        if not (request.user.is_staff or order.buyer_id == request.user.id):
+            raise PermissionDenied("not allowed")
+
+        if order.status in ("PAID", "DELIVERED"):
+            return Response({"detail": "already confirmed"}, status=200)
+
+        now_ts = dj_timezone.now()
+        with transaction.atomic():
+            order.status = "DELIVERED"
+            order.paid_at = now_ts
+            order.delivered_at = now_ts
+            order.save(update_fields=["status", "paid_at", "delivered_at"])
+
+            # Marca i subitem venduti
+            listing = order.listing
+            listing.subitems.filter(subitem__is_sold=False).update()  # select
+            for lsi in listing.subitems.select_related("subitem").filter(subitem__is_sold=False):
+                lsi.subitem.is_sold = True
+                lsi.subitem.save(update_fields=["is_sold"])
+
+            # Segna il listing SOLD
+            listing.status = "SOLD"
+            listing.qty = 0
+            listing.save(update_fields=["status", "qty", "updated_at"])
+
+        return Response({"detail": "confirmed", "order_id": order.id, "status": order.status}, status=200)
+
     @action(detail=True, methods=["get"], url_path="download", permission_classes=[permissions.IsAuthenticated])
     def download(self, request, pk=None):
         """
