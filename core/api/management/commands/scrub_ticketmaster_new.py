@@ -305,22 +305,51 @@ class Command(BaseCommand):
                                 checksum_dati=checksum,
                             )
                             created_map += 1
+
                         else:
-                            if (mapping.checksum_dati or "") == checksum:
-                                mapping.ultima_scansione = now
-                                mapping.save(update_fields=["ultima_scansione", "aggiornato_il"])
-                                skipped_unchanged_map += 1
-                            else:
+                            """
+                            Mapping già esistente.
+
+                            Attenzione:
+                            non basta controllare solo il checksum, perché in passato possiamo avere
+                            mapping sporchi con:
+                                stesso id_evento_piattaforma
+                                ma URL o evento collegato sbagliati
+
+                            Quindi correggiamo sempre:
+                            - evento;
+                            - url;
+                            - ultima_scansione;
+                            anche se il checksum sembra invariato.
+                            """
+
+                            update_fields = ["ultima_scansione", "aggiornato_il"]
+                            changed_map = False
+
+                            mapping.ultima_scansione = now
+
+                            if mapping.evento_id != evento.id:
                                 mapping.evento = evento
-                                if url:
-                                    mapping.url = url
-                                mapping.ultima_scansione = now
+                                update_fields.append("evento")
+                                changed_map = True
+
+                            if url and mapping.url != url:
+                                mapping.url = url
+                                update_fields.append("url")
+                                changed_map = True
+
+                            if (mapping.checksum_dati or "") != checksum:
                                 mapping.snapshot_raw = e
                                 mapping.checksum_dati = checksum
-                                mapping.save(update_fields=[
-                                    "evento", "url", "ultima_scansione", "snapshot_raw", "checksum_dati", "aggiornato_il"
-                                ])
+                                update_fields.extend(["snapshot_raw", "checksum_dati"])
+                                changed_map = True
+
+                            mapping.save(update_fields=list(dict.fromkeys(update_fields)))
+
+                            if changed_map:
                                 updated_map += 1
+                            else:
+                                skipped_unchanged_map += 1
 
                         # --- PERFORMANCE (robusta) ---
                         # Mai saltare se abbiamo localDate.
