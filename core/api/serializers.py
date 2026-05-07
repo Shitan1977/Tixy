@@ -789,9 +789,15 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
         elif perf and hasattr(perf, "evento") and perf.evento and hasattr(perf.evento, "id"):
             event_id_value = perf.evento.id
 
+        # Estrai performance_id
+        performance_id_value = None
+        if perf and hasattr(perf, "id"):
+            performance_id_value = perf.id
+
         return {
             "id": getattr(obj, "id", None),
             "event_id": event_id_value,
+            "performance_id": performance_id_value,
             "event_title": title,
             "event_date": event_date,
             "activated_at": activated_at,
