@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional
 
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -233,9 +233,43 @@ def get_or_create_piattaforma_ticketone() -> Piattaforma:
     )
     return piattaforma
 
-
 @transaction.atomic
 def import_ticketone_item(item: TicketOneEventItem) -> dict:
+    """
+    Importa o aggiorna un evento proveniente da TicketOne.
+
+    Correzione importante:
+    -----------------------
+    EventoPiattaforma ha un vincolo unico sulla coppia:
+
+        evento + piattaforma
+
+    Quindi non possiamo creare più collegamenti TicketOne
+    per lo stesso evento interno.
+
+    Prima versione del codice:
+    --------------------------
+    cercava EventoPiattaforma usando:
+
+        piattaforma + id_evento_piattaforma
+
+    Questo poteva causare errore MySQL:
+
+        Duplicate entry 'evento_id-piattaforma_id'
+        for key 'uq_evento_plat_pair'
+
+    Nuova logica:
+    -------------
+    1. creiamo/recuperiamo piattaforma, categoria, luogo, evento e performance
+    2. se la performance appartiene già a un altro evento, usiamo quell'evento
+    3. cerchiamo prima EventoPiattaforma per evento + piattaforma
+    4. se non esiste, cerchiamo per piattaforma + external_id
+    5. se non esiste ancora, creiamo il record
+    6. se esiste, aggiorniamo i dati
+    7. se MySQL intercetta comunque un duplicato, recuperiamo il record esistente
+       e lo aggiorniamo invece di far crashare il cron
+    """
+
     piattaforma = get_or_create_piattaforma_ticketone()
     categoria = get_or_create_categoria(item.category_hint)
     luogo = get_or_create_luogo(item)
@@ -244,9 +278,13 @@ def import_ticketone_item(item: TicketOneEventItem) -> dict:
 
     # Se la performance trovata appartiene a un evento già esistente
     # proveniente da un'altra piattaforma, usiamo quell'evento come riferimento.
-    # Così EventoPiattaforma TicketOne viene collegato all'evento corretto.
+    # Così TicketOne viene collegato all'evento corretto già presente nel DB.
     if performance and performance.evento_id != evento.id:
         evento = performance.evento
+
+    checksum = hashlib.sha256(
+        f"{item.title}|{item.city}|{item.venue}|{item.starts_at_raw}|{item.price_text}".encode("utf-8")
+    ).hexdigest()
 
     ep_defaults = {
         "url": item.event_url,
@@ -260,54 +298,103 @@ def import_ticketone_item(item: TicketOneEventItem) -> dict:
             "detail_status": item.detail_status,
             "source": item.source,
         },
-        "checksum_dati": hashlib.sha256(
-            f"{item.title}|{item.city}|{item.venue}|{item.starts_at_raw}|{item.price_text}".encode("utf-8")
-        ).hexdigest(),
+        "checksum_dati": checksum,
     }
 
-    if item.external_id:
-        ep, created = EventoPiattaforma.objects.get_or_create(
+    external_id = normalize_text(item.external_id) or None
+
+    created = False
+
+    # ------------------------------------------------------------
+    # 1. Prima cerchiamo il collegamento più importante:
+    #    evento interno + piattaforma.
+    #    Questo rispetta il vincolo uq_evento_plat_pair.
+    # ------------------------------------------------------------
+    ep = EventoPiattaforma.objects.filter(
+        evento=evento,
+        piattaforma=piattaforma,
+    ).first()
+
+    # ------------------------------------------------------------
+    # 2. Se non esiste per evento + piattaforma,
+    #    proviamo a recuperarlo tramite external_id TicketOne.
+    #    Questo è utile quando TicketOne aveva già creato un mapping
+    #    verso un altro evento interno.
+    # ------------------------------------------------------------
+    if not ep and external_id:
+        ep = EventoPiattaforma.objects.filter(
             piattaforma=piattaforma,
-            id_evento_piattaforma=item.external_id,
-            defaults={
-                "evento": evento,
+            id_evento_piattaforma=external_id,
+        ).first()
+
+    # ------------------------------------------------------------
+    # 3. Se non esiste nessun mapping, lo creiamo.
+    #    Qui gestiamo anche il caso raro in cui MySQL trovi un duplicato
+    #    tra il controllo precedente e la create.
+    # ------------------------------------------------------------
+    if not ep:
+        try:
+            ep = EventoPiattaforma.objects.create(
+                evento=evento,
+                piattaforma=piattaforma,
+                id_evento_piattaforma=external_id,
                 **ep_defaults,
-            },
-        )
-        if not created:
-            changed = False
-            if ep.evento_id != evento.id:
-                ep.evento = evento
-                changed = True
-            for field, value in ep_defaults.items():
-                if getattr(ep, field) != value:
-                    setattr(ep, field, value)
-                    changed = True
-            if changed:
-                ep.save()
-    else:
-        ep, created = EventoPiattaforma.objects.get_or_create(
-            evento=evento,
-            piattaforma=piattaforma,
-            defaults={
-                "id_evento_piattaforma": None,
-                **ep_defaults,
-            },
-        )
-        if not created:
-            changed = False
-            for field, value in ep_defaults.items():
-                if getattr(ep, field) != value:
-                    setattr(ep, field, value)
-                    changed = True
-            if changed:
-                ep.save()
+            )
+            created = True
+
+        except IntegrityError:
+            # Fallback di sicurezza:
+            # se il DB segnala un duplicato evento + piattaforma,
+            # recuperiamo il record già esistente invece di fermare tutto.
+            ep = EventoPiattaforma.objects.filter(
+                evento=evento,
+                piattaforma=piattaforma,
+            ).first()
+
+            # Se non lo troviamo ancora, proviamo con external_id.
+            if not ep and external_id:
+                ep = EventoPiattaforma.objects.filter(
+                    piattaforma=piattaforma,
+                    id_evento_piattaforma=external_id,
+                ).first()
+
+            # Se anche così non troviamo nulla, rilanciamo l'errore:
+            # significa che c'è un problema diverso e va visto.
+            if not ep:
+                raise
+
+    # ------------------------------------------------------------
+    # 4. Aggiornamento del mapping esistente.
+    #    Non creiamo duplicati: aggiorniamo il record già presente.
+    # ------------------------------------------------------------
+    changed = False
+
+    if ep.evento_id != evento.id:
+        ep.evento = evento
+        changed = True
+
+    if ep.piattaforma_id != piattaforma.id:
+        ep.piattaforma = piattaforma
+        changed = True
+
+    if external_id and ep.id_evento_piattaforma != external_id:
+        ep.id_evento_piattaforma = external_id
+        changed = True
+
+    for field, value in ep_defaults.items():
+        if getattr(ep, field) != value:
+            setattr(ep, field, value)
+            changed = True
+
+    if changed:
+        ep.save()
 
     return {
         "evento_id": evento.id,
         "performance_id": performance.id if performance else None,
         "evento_piattaforma_id": ep.id,
         "created_event": evento.creato_il == evento.aggiornato_il,
+        "created_evento_piattaforma": created,
         "has_performance": performance is not None,
         "detail_status": item.detail_status,
         "title": item.title,
