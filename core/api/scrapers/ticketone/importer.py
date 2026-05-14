@@ -73,6 +73,38 @@ def infer_venue_from_title(title: Optional[str]) -> str:
             return normalize_text(match.group(1))
 
     return ""
+
+def clean_title_from_inferred_venue(title: Optional[str], venue: Optional[str]) -> str:
+    """
+    Pulisce il titolo TicketOne rimuovendo la venue quando questa
+    è stata ricavata dal titolo stesso.
+
+    Esempio:
+    'K Pop Dream International Tribute Show Teatro Grandinetti'
+    + venue 'Teatro Grandinetti'
+    diventa:
+    'K Pop Dream International Tribute Show'
+    """
+
+    title = normalize_text(title)
+    venue = normalize_text(venue)
+
+    if not title:
+        return "Evento TicketOne"
+
+    if not venue:
+        return title
+
+    # Se il titolo finisce con il nome della venue, lo rimuoviamo.
+    title_lower = title.lower()
+    venue_lower = venue.lower()
+
+    if title_lower.endswith(venue_lower):
+        cleaned = title[: -len(venue)].strip()
+        cleaned = re.sub(r"[-–—|:,]+$", "", cleaned).strip()
+        return cleaned or title
+
+    return title
 def build_unique_slug(base_text: str, suffix: Optional[str] = None) -> str:
     base = slugify(base_text)[:220] or "evento"
     if suffix:
@@ -234,7 +266,13 @@ def get_or_create_luogo(item: TicketOneEventItem) -> Optional[Luoghi]:
 
     return luogo
 def get_or_create_evento(item: TicketOneEventItem, categoria: Optional[Categoria]) -> Evento:
-    title = normalize_text(item.title) or "Evento TicketOne"
+    raw_title = normalize_text(item.title) or "Evento TicketOne"
+
+    inferred_venue = ""
+    if not normalize_text(item.venue):
+        inferred_venue = infer_venue_from_title(raw_title)
+
+    title = clean_title_from_inferred_venue(raw_title, inferred_venue) or raw_title
     city = normalize_text(item.city)
     starts_at_raw = normalize_text(item.starts_at_raw)
 
