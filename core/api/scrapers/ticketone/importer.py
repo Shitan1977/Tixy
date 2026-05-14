@@ -127,7 +127,74 @@ def get_or_create_luogo(item: TicketOneEventItem) -> Optional[Luoghi]:
 
     return luogo
 
+def get_or_create_luogo(item: TicketOneEventItem) -> Optional[Luoghi]:
+    """
+    Recupera o crea il luogo dell'evento TicketOne.
 
+    Caso normale:
+    - TicketOne fornisce city e/o venue.
+
+    Caso fallback:
+    - TicketOne dalla lista non fornisce city/venue.
+    - Proviamo allora a ricavare la venue dal titolo.
+    - Questo permette almeno di creare una Performance e rendere
+      visibile l'evento nel nostro portale.
+    """
+
+    city = normalize_text(item.city)
+    venue = normalize_text(item.venue)
+
+    # Fallback: se TicketOne non dà la venue, proviamo a ricavarla dal titolo.
+    if not venue:
+        venue = infer_venue_from_title(item.title)
+
+    # Se non abbiamo né città né venue, non possiamo creare un luogo sensato.
+    if not city and not venue:
+        return None
+
+    if venue:
+        nome = venue
+        nome_normalizzato = normalize_name(venue)
+    else:
+        nome = city
+        nome_normalizzato = normalize_name(city)
+
+    luogo, created = Luoghi.objects.get_or_create(
+        nome_normalizzato=nome_normalizzato,
+        defaults={
+            "nome": nome,
+            "citta": city or None,
+            "citta_normalizzata": normalize_name(city) or None,
+            "stato_iso": "IT",
+            "timezone": "Europe/Rome",
+        },
+    )
+
+    updated = False
+
+    if city and luogo.citta != city:
+        luogo.citta = city
+        luogo.citta_normalizzata = normalize_name(city)
+        updated = True
+
+    if not luogo.stato_iso:
+        luogo.stato_iso = "IT"
+        updated = True
+
+    if not luogo.timezone:
+        luogo.timezone = "Europe/Rome"
+        updated = True
+
+    if updated:
+        luogo.save(update_fields=[
+            "citta",
+            "citta_normalizzata",
+            "stato_iso",
+            "timezone",
+            "aggiornato_il",
+        ])
+
+    return luogo
 def get_or_create_evento(item: TicketOneEventItem, categoria: Optional[Categoria]) -> Evento:
     title = normalize_text(item.title) or "Evento TicketOne"
     city = normalize_text(item.city)
