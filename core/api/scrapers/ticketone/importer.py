@@ -34,7 +34,45 @@ def normalize_name(value: Optional[str]) -> str:
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
+def infer_venue_from_title(title: Optional[str]) -> str:
+    """
+    Prova a ricavare una venue dal titolo TicketOne quando la lista
+    non fornisce city/venue.
 
+    Esempio:
+    'K Pop Dream International Tribute Show Teatro Grandinetti'
+    diventa:
+    'Teatro Grandinetti'
+
+    Serve per evitare che alcuni eventi TicketOne entrino nel DB
+    senza Performance e quindi non siano visibili nel portale.
+    """
+
+    title = normalize_text(title)
+    if not title:
+        return ""
+
+    patterns = [
+        r"\b(Cinema Teatro\s+.+)$",
+        r"\b(Teatro\s+.+)$",
+        r"\b(Auditorium\s+.+)$",
+        r"\b(Arena\s+.+)$",
+        r"\b(Stadio\s+.+)$",
+        r"\b(Palazzetto\s+.+)$",
+        r"\b(Anfiteatro\s+.+)$",
+        r"\b(Castello\s+.+)$",
+        r"\b(Parco\s+.+)$",
+        r"\b(Ippodromo\s+.+)$",
+        r"\b(Fiera\s+.+)$",
+        r"\b(Politeama\s+.+)$",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, title, flags=re.IGNORECASE)
+        if match:
+            return normalize_text(match.group(1))
+
+    return ""
 def build_unique_slug(base_text: str, suffix: Optional[str] = None) -> str:
     base = slugify(base_text)[:220] or "evento"
     if suffix:
