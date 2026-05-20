@@ -54,6 +54,106 @@ def normalize_text(value: Optional[str]) -> Optional[str]:
     cleaned = " ".join(value.split())
     return cleaned.strip() or None
 
+def is_bad_location_value(value: Optional[str]) -> bool:
+    value = normalize_text(value)
+    if not value:
+        return True
+
+    low = value.lower()
+
+    bad_parts = [
+        "sommario eventi",
+        "eventi internazionali",
+        "www.ticketone.it",
+        "ticketone.it",
+        "consenso ai cookie",
+        "cookie",
+        "privacy",
+        "newsletter",
+        "login",
+        "registrati",
+        "carrello",
+        "biglietti",
+    ]
+
+    return any(part in low for part in bad_parts)
+
+
+def infer_location_from_ticketone_url(url: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Fallback prudente per URL TicketOne quando il dettaglio restituisce
+    città/venue sporche o mancanti.
+
+    La logica usa lo slug dell'URL TicketOne.
+    Serve soprattutto per lo scrub automatico.
+    """
+
+    url = normalize_text(url)
+    if not url:
+        return None, None
+
+    low = url.lower()
+
+    location_map = [
+        # Roma
+        ("tor-vergata", "Roma", "Tor Vergata"),
+        ("stadio-olimpico", "Roma", "Stadio Olimpico"),
+        ("ippodromo-le-capannelle", "Roma", "Ippodromo Le Capannelle"),
+
+        # Milano
+        ("unipol-dome-arena-milano", "Milano", "Unipol Dome"),
+        ("unipol-dome", "Milano", "Unipol Dome"),
+        ("fiera-milano-live", "Milano", "Fiera Milano Live"),
+        ("parco-della-musica-di-milano", "Milano", "Parco della Musica di Milano"),
+        ("ippodromo-snai-san-siro", "Milano", "Ippodromo SNAI San Siro"),
+        ("stadio-san-siro", "Milano", "Stadio San Siro"),
+        ("san-siro", "Milano", "Stadio San Siro"),
+        ("legend-club", "Milano", "Legend Club"),
+        ("piazza-sempione", "Milano", "Piazza Sempione"),
+
+        # Torino / Piemonte
+        ("allianz-stadium", "Torino", "Allianz Stadium"),
+        ("inalpi-arena", "Torino", "Inalpi Arena"),
+        ("kioene-arena", "Padova", "Kioene Arena"),
+        ("castello-di-lagnasco", "Lagnasco", "Castello di Lagnasco"),
+
+        # Emilia / Veneto / Friuli
+        ("parco-ragazzi-del-99", "Bassano del Grappa", "Parco Ragazzi del '99"),
+        ("arena-di-verona", "Verona", "Arena di Verona"),
+        ("villa-manin", "Codroipo", "Villa Manin"),
+        ("teatro-romano-fiesole", "Fiesole", "Teatro Romano di Fiesole"),
+        ("teatro-europauditorium", "Bologna", "Teatro EuropAuditorium"),
+        ("castello-estense", "Ferrara", "Castello Estense"),
+
+        # Toscana / Liguria
+        ("cava-di-roselle", "Grosseto", "Cava di Roselle"),
+        ("bussoladomani", "Lido di Camaiore", "Bussoladomani"),
+        ("mura-di-lucca", "Lucca", "Mura di Lucca"),
+        ("piazza-alfieri", "Asti", "Piazza Alfieri"),
+        ("politeama-genovese", "Genova", "Politeama Genovese"),
+
+        # Centro / Sud / Isole
+        ("arena-santa-giuliana", "Perugia", "Arena Santa Giuliana"),
+        ("anfiteatro-scavi-di-pompei", "Pompei", "Anfiteatro degli Scavi di Pompei"),
+        ("anfiteatro-degli-scavi", "Pompei", "Anfiteatro degli Scavi di Pompei"),
+        ("anfiteatro-falcone-e-borsellino", "Zafferana Etnea", "Anfiteatro Falcone e Borsellino"),
+        ("reggia-di-caserta", "Caserta", "Reggia di Caserta"),
+        ("fiera-del-levante", "Bari", "Fiera del Levante"),
+        ("villa-bellini", "Catania", "Villa Bellini"),
+        ("olbia-arena", "Olbia", "Olbia Arena"),
+
+        # Altri luoghi
+        ("parco-della-pace", None, "Parco della Pace"),
+        ("teatro-nuovo", None, "Teatro Nuovo"),
+        ("stadio-comunale", None, "Stadio Comunale"),
+        ("parco-urbano-bassani", "Ferrara", "Parco Urbano Bassani"),
+    ]
+
+    for slug, city, venue in location_map:
+        if slug in low:
+            return city, venue
+
+    return None, None
 
 def extract_date_time_from_text(text: str) -> Optional[str]:
     text = normalize_text(text)
@@ -306,6 +406,22 @@ def parse_event_detail(html: str, item: TicketOneEventItem) -> TicketOneEventIte
             maybe_price = extract_price_from_text(line)
             if maybe_price:
                 price_text = maybe_price
+
+    # Pulizia valori sporchi presi da menu/header/footer/cookie.
+    if is_bad_location_value(city):
+        city = None
+
+    if is_bad_location_value(venue):
+        venue = None
+
+    # Fallback da URL, utile per pagine come Ultimo Tor Vergata.
+    fallback_city, fallback_venue = infer_location_from_ticketone_url(item.event_url)
+
+    if not city and fallback_city:
+        city = fallback_city
+
+    if not venue and fallback_venue:
+        venue = fallback_venue
 
     return TicketOneEventItem(
         title=title,

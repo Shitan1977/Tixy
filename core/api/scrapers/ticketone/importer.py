@@ -279,30 +279,72 @@ def get_or_create_evento(item: TicketOneEventItem, categoria: Optional[Categoria
     hash_value = canonical_hash(title, city, starts_at_raw)
     slug = build_unique_slug(title, item.external_id or hash_value[:8])
 
+    # 1. Prima cerchiamo per hash canonico.
     evento = Evento.objects.filter(hash_canonico=hash_value).first()
     if evento:
         updated = False
+
         if categoria and evento.categoria_id != categoria.id:
             evento.categoria = categoria
             updated = True
+
         if updated:
             evento.save(update_fields=["categoria", "aggiornato_il"])
+
         return evento
 
-    evento = Evento.objects.create(
-        slug=slug,
-        nome_evento=title,
-        nome_evento_normalizzato=normalize_name(title),
-        stato="pianificato",
-        categoria=categoria,
-        hash_canonico=hash_value,
-        note_raw={
-            "source": item.source,
-            "detail_status": item.detail_status,
-            "ticketone_external_id": item.external_id,
-        },
-    )
-    return evento
+    # 2. Poi cerchiamo per slug.
+    # Questo evita errori tipo:
+    # Duplicate entry 'nome-evento-externalid' for key api_evento_slug_uniq
+    evento = Evento.objects.filter(slug=slug).first()
+    if evento:
+        updated = False
+
+        if categoria and evento.categoria_id != categoria.id:
+            evento.categoria = categoria
+            updated = True
+
+        note_raw = evento.note_raw or {}
+        if isinstance(note_raw, dict):
+            if item.external_id and not note_raw.get("ticketone_external_id"):
+                note_raw["ticketone_external_id"] = item.external_id
+                evento.note_raw = note_raw
+                updated = True
+
+        if updated:
+            evento.save(update_fields=["categoria", "note_raw", "aggiornato_il"])
+
+        return evento
+
+    # 3. Creazione evento nuovo.
+    try:
+        evento = Evento.objects.create(
+            slug=slug,
+            nome_evento=title,
+            nome_evento_normalizzato=normalize_name(title),
+            stato="pianificato",
+            categoria=categoria,
+            hash_canonico=hash_value,
+            note_raw={
+                "source": item.source,
+                "detail_status": item.detail_status,
+                "ticketone_external_id": item.external_id,
+            },
+        )
+        return evento
+
+    except IntegrityError:
+        # 4. Fallback finale: se tra controllo e create lo slug è già apparso,
+        # recuperiamo l'evento invece di far fallire tutto lo scrub.
+        evento = Evento.objects.filter(slug=slug).first()
+        if evento:
+            return evento
+
+        evento = Evento.objects.filter(hash_canonico=hash_value).first()
+        if evento:
+            return evento
+
+        raise
 
 
 def get_or_create_performance(evento: Evento, luogo: Optional[Luoghi], item: TicketOneEventItem) -> Optional[Performance]:
