@@ -26,17 +26,80 @@ from api.scrapers.ticketmaster_availability import check_ticketmaster_mapping_av
 
 
 # -------------------------
+# Costanti di sicurezza
+# -------------------------
+
+# PATCH 4 — Reason "available" che non triggherano email.
+# Sono segnali troppo deboli o provenienti da fonti inaffidabili.
+# Aggiunti qui i reason legacy (prima della patch) che potrebbero
+# ancora apparire se il file scraper non fosse aggiornato.
+_WEAK_AVAILABLE_REASONS: frozenset[str] = frozenset({
+    # HTML statico — frasi rimosse da strong_positive ma ancora
+    # possibili se lo scraper non è stato aggiornato
+    "strong_positive_keyword:buy tickets",
+    "strong_positive_keyword:acquista biglietti",
+    "strong_positive_keyword:tickets available",
+    "strong_positive_keyword:find tickets",
+    "strong_positive_keyword:get tickets",
+    "strong_positive_keyword:select tickets",
+    # Discovery senza conferma reale
+    "discovery_available_url_match",
+})
+
+
+def _is_reliable_available(availability: str, reason: str) -> bool:
+    """
+    Ritorna True solo se availability è "available" e la reason contiene
+    un segnale esplicitamente forte.
+
+    Regola prudente:
+    meglio perdere un alert vero che inviare un falso positivo.
+    """
+    if availability != "available":
+        return False
+
+    reason = (reason or "").lower().strip()
+
+    if not reason:
+        return False
+
+    weak_tokens = [
+        "buy tickets",
+        "acquista biglietti",
+        "tickets available",
+        "find tickets",
+        "get tickets",
+        "select tickets",
+        "discovery_available_url_match",
+        "weak_positive_keyword",
+        "price_without_context",
+        "no_strong_signals",
+    ]
+
+    for token in weak_tokens:
+        if token in reason:
+            return False
+
+    strong_tokens = [
+        "browser_price_detected",
+        "strong_positive_keyword:aggiungi al carrello",
+        "strong_positive_keyword:procedi all'acquisto",
+        "strong_positive_keyword:procedi con l'acquisto",
+        "strong_positive_keyword:seleziona biglietti",
+        "strong_positive_keyword:scegli i biglietti",
+    ]
+
+    for token in strong_tokens:
+        if token in reason:
+            return True
+
+    return False
+
+# -------------------------
 # Helpers abbonamenti / DB
 # -------------------------
 
 def _abbonamento_is_active(ab: Abbonamento) -> bool:
-    """
-    Verifica se un abbonamento è realmente attivo.
-
-    Controlliamo:
-    - flag attivo;
-    - data_fine, se presente.
-    """
     if not getattr(ab, "attivo", False):
         return False
 
@@ -49,13 +112,6 @@ def _abbonamento_is_active(ab: Abbonamento) -> bool:
 
 
 def _has_internal_tickets(perf: Performance) -> bool:
-    """
-    Se Tixy ha già biglietti/listing interni per quella performance,
-    non mandiamo alert Ticketmaster.
-
-    Motivo:
-    l'utente può già comprare dentro il nostro ecosistema.
-    """
     if Biglietto.objects.filter(performance=perf, is_valid=True).exists():
         return True
 
@@ -66,29 +122,12 @@ def _has_internal_tickets(perf: Performance) -> bool:
 
 
 def _dedupe_key(perf_id: int, user_id: int, platform: str, reason: str) -> str:
-    """
-    Crea una chiave giornaliera di deduplica.
-
-    Così lo stesso utente non riceve infinite email nello stesso giorno
-    per la stessa performance.
-    """
     day = timezone.now().date().isoformat()
 
     return f"{platform}:{reason}:perf:{perf_id}:user:{user_id}:{day}"
 
 
 def _extract_tm_code_from_url(url: Optional[str]) -> Optional[str]:
-    """
-    Estrae il codice finale dalla URL Ticketmaster.
-
-    Esempio:
-        https://www.ticketmaster.it/biglietti/.../event/bmxkd8vgqcmc
-
-    ritorna:
-        bmxkd8vgqcmc
-
-    Serve come fallback quando il mapping non ha un id_evento_piattaforma affidabile.
-    """
     if not url:
         return None
 
@@ -106,23 +145,6 @@ def _extract_tm_code_from_url(url: Optional[str]) -> Optional[str]:
 def _get_ticketmaster_mapping_for_performance(
     perf: Performance,
 ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int]]:
-    """
-    Recupera il mapping Ticketmaster per una performance.
-
-    Ordine:
-    1. PerformancePiattaforma, se esiste;
-    2. EventoPiattaforma, fallback a livello evento.
-
-    Ritorna:
-        (url, tm_id, mapping_type, mapping_pk)
-
-    Dove:
-        mapping_type = "performance" | "evento" | None
-
-    Nota importante:
-    tm_id viene letto da id_evento_piattaforma se presente.
-    Se manca, usiamo come fallback il codice finale della URL.
-    """
     pp = (
         PerformancePiattaforma.objects
         .filter(performance=perf, piattaforma__nome__iexact="ticketmaster")
@@ -153,9 +175,6 @@ def _get_ticketmaster_mapping_for_performance(
 
 
 def _touch_last_scan(mapping_type: Optional[str], mapping_pk: Optional[int]) -> None:
-    """
-    Aggiorna ultima_scansione sul mapping realmente usato.
-    """
     if not mapping_type or not mapping_pk:
         return
 
@@ -169,12 +188,6 @@ def _touch_last_scan(mapping_type: Optional[str], mapping_pk: Optional[int]) -> 
 
 
 def _sleep_with_jitter(base: float, *, heavy: bool = False) -> None:
-    """
-    Pausa anti-ban con jitter casuale.
-
-    Se heavy=True, aggiungiamo una pausa più lunga,
-    utile dopo errori 403/429/5xx o eccezioni.
-    """
     jitter = random.uniform(0.15, 0.85)
     extra = random.uniform(2.0, 6.0) if heavy else 0.0
 
@@ -189,12 +202,6 @@ def _send_email_with_retry(
     max_retries: int,
     base_wait: float,
 ) -> Tuple[bool, str]:
-    """
-    Invia email con retry progressivo.
-
-    Ritorna:
-        (ok, last_error)
-    """
     last_error = ""
 
     for attempt in range(1, max_retries + 1):
@@ -218,9 +225,6 @@ def _send_email_with_retry(
 
 
 def _format_when(perf: Performance) -> str:
-    """
-    Formatta la data evento per l'email.
-    """
     starts_at = getattr(perf, "starts_at_utc", None)
 
     if not starts_at:
@@ -239,9 +243,6 @@ def _build_email_message(
     tm_url: str,
     result: dict,
 ) -> Tuple[str, str]:
-    """
-    Costruisce subject e corpo email.
-    """
     event_title = perf.evento.nome_evento if getattr(perf, "evento_id", None) else "Evento"
     luogo = getattr(perf.luogo, "nome", "") if getattr(perf, "luogo_id", None) else ""
     when = _format_when(perf)
@@ -312,6 +313,7 @@ class Command(BaseCommand):
             default=1.5,
             help="Attesa base tra tentativi email.",
         )
+
         parser.add_argument(
             "--only-email",
             type=str,
@@ -385,6 +387,7 @@ class Command(BaseCommand):
             "skip_internal": 0,
             "skip_no_mapping": 0,
             "skip_not_avail": 0,
+            "skip_weak_signal": 0,   # PATCH 4 — nuovo contatore
             "skip_dedup": 0,
             "tm_error": 0,
             "email_fail": 0,
@@ -467,6 +470,7 @@ class Command(BaseCommand):
                     continue
 
                 availability = result.get("availability")
+                reason = result.get("reason", "")
 
                 if availability != "available":
                     counters["skip_not_avail"] += 1
@@ -474,8 +478,21 @@ class Command(BaseCommand):
                     if verbose:
                         self.stdout.write(
                             f"[TM] perf {perf.id} tm_id={tm_id} => {availability} "
-                            f"({result.get('reason')})"
+                            f"({reason})"
                         )
+
+                    _sleep_with_jitter(sleep_s)
+                    continue
+
+                # PATCH 4 — Doppio controllo: "available" non basta.
+                # Verifica che il segnale provenga da una fonte affidabile.
+                if not _is_reliable_available(availability, reason):
+                    counters["skip_weak_signal"] += 1
+
+                    self.stdout.write(
+                        f"[WEAK SIGNAL] perf {perf.id} tm_id={tm_id} "
+                        f"availability={availability} reason={reason} => skip email"
+                    )
 
                     _sleep_with_jitter(sleep_s)
                     continue
@@ -483,7 +500,7 @@ class Command(BaseCommand):
                 if verbose:
                     self.stdout.write(
                         f"[TM AVAILABLE] perf {perf.id} tm_id={tm_id} "
-                        f"price={result.get('price')} reason={result.get('reason')}"
+                        f"price={result.get('price')} reason={reason}"
                     )
 
                 dedupe_key = _dedupe_key(
@@ -525,7 +542,7 @@ class Command(BaseCommand):
                 if dry_run:
                     self.stdout.write(
                         f"[DRY] WOULD EMAIL user={user.email} "
-                        f"perf={perf.id} url={tm_url} price={result.get('price')}"
+                        f"perf={perf.id} url={tm_url} price={result.get('price')} reason={reason}"
                     )
 
                     counters["notified"] += 1
@@ -562,7 +579,7 @@ class Command(BaseCommand):
 
                 counters["notified"] += 1
 
-                self.stdout.write(f"[EMAIL OK] {user.email} perf={perf.id}")
+                self.stdout.write(f"[EMAIL OK] {user.email} perf={perf.id} reason={reason}")
 
                 _sleep_with_jitter(sleep_s)
 
@@ -582,6 +599,7 @@ class Command(BaseCommand):
             f"skip_internal={counters['skip_internal']} "
             f"skip_no_mapping={counters['skip_no_mapping']} "
             f"skip_not_avail={counters['skip_not_avail']} "
+            f"skip_weak_signal={counters['skip_weak_signal']} "
             f"skip_dedup={counters['skip_dedup']} "
             f"tm_error={counters['tm_error']} "
             f"email_fail={counters['email_fail']} "
