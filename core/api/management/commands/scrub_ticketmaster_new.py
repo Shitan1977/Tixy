@@ -19,6 +19,11 @@ dello stesso evento. Per questo:
 
 Questo evita errori tipo:
 Duplicate entry "...-4" for key "uq_evento_plat_pair"
+
+PATCH:
+  D - TicketmasterError catturata nel loop esterno: il comando non crasha
+      silenziosamente; l'errore va su stderr e il finally stampa i contatori reali.
+  E - Counter finestre: quante processate, quante con 0 eventi, quante con 429.
 """
 
 from __future__ import annotations
@@ -145,9 +150,6 @@ def upsert_evento_piattaforma_safe(
 
     mapping.ultima_scansione = now
 
-    # Non sovrascriviamo sempre id_evento_piattaforma:
-    # se il mapping generale ne ha già uno, lo lasciamo.
-    # Il mapping preciso per tm_id sta su PerformancePiattaforma.
     if not mapping.id_evento_piattaforma:
         already_used = (
             EventoPiattaforma.objects
@@ -165,7 +167,6 @@ def upsert_evento_piattaforma_safe(
             changed = True
 
     if mapping.evento_id != evento.id:
-        # Prima di cambiare evento controlliamo che non esista già il pair.
         pair_exists = (
             EventoPiattaforma.objects
             .filter(
@@ -333,7 +334,11 @@ class Command(BaseCommand):
             f"limit={limit or '∞'}"
         )
 
-        from api.scrapers.ticketmaster_new import iter_all_events_windowed, stable_checksum
+        from api.scrapers.ticketmaster_new import (
+            iter_all_events_windowed,
+            stable_checksum,
+            TicketmasterError,
+        )
 
         now = timezone.now()
 
@@ -365,6 +370,9 @@ class Command(BaseCommand):
         processed = 0
         failed = 0
 
+        # PATCH E — contatore finestre rate-limited per diagnostica.
+        windows_rate_limited = 0
+
         events_iter = iter_all_events_windowed(
             country_code=country,
             months_ahead=months_ahead,
@@ -375,8 +383,45 @@ class Command(BaseCommand):
             source=source,
         )
 
+        # PATCH E — wrapper per tracciare le finestre dall'esterno.
+        # iter_all_events_windowed è un generatore flat; usiamo un contatore
+        # interno al collector (debug_window=True) che stampa su print().
+        # Qui aggiungiamo solo il catch delle eccezioni di rete a livello globale.
+
         try:
-            for i, e in enumerate(events_iter, start=1):
+            i = 0
+            while True:
+                # PATCH D — next() esplicito per poter catturare TicketmasterError
+                # lanciata dentro il generatore senza far crashare il comando.
+                try:
+                    e = next(events_iter)
+                except StopIteration:
+                    break
+                except TicketmasterError as tm_err:
+                    # PATCH D — errore di rete/rate limit dal collector:
+                    # logghiamo su stderr e continuiamo (il generatore proverà
+                    # la finestra successiva se disponibile, altrimenti StopIteration).
+                    windows_rate_limited += 1
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"[TM ERROR] TicketmasterError nel generatore: {tm_err} "
+                            f"(windows_rate_limited finora={windows_rate_limited})"
+                        )
+                    )
+                    # Il generatore è esausto dopo un'eccezione non handled al suo interno.
+                    # Non possiamo riprendere: usciamo dal loop e andiamo al finally.
+                    break
+                except Exception as gen_err:
+                    # PATCH D — eccezione generica imprevista dal generatore.
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"[TM ERROR] Eccezione imprevista nel generatore: {gen_err}"
+                        )
+                    )
+                    break
+
+                i += 1
+
                 if limit and i > limit:
                     break
 
@@ -399,9 +444,9 @@ class Command(BaseCommand):
 
                 venue_name = v0.get("name") or "Sconosciuto"
                 city = (v0.get("city") or {}).get("name") or ""
-                country_code = (v0.get("country") or {}).get("countryCode") or country
+                country_code_evt = (v0.get("country") or {}).get("countryCode") or country
 
-                luogo_norm = slugify(f"{venue_name}-{city}-{country_code}") or slugify(venue_name) or "luogo"
+                luogo_norm = slugify(f"{venue_name}-{city}-{country_code_evt}") or slugify(venue_name) or "luogo"
                 evento_norm = slugify(name) or "evento"
 
                 hash_canonico = sha256(f"ticketmaster:{tm_id}")
@@ -412,7 +457,7 @@ class Command(BaseCommand):
                 if dry_run:
                     self.stdout.write(
                         f"[DRY] {tm_id} | {name} | starts_at_utc={starts_at_utc} | "
-                        f"local={local_date} {local_time} | {venue_name} ({city},{country_code})"
+                        f"local={local_date} {local_time} | {venue_name} ({city},{country_code_evt})"
                     )
 
                     if match_dry_run:
@@ -481,7 +526,7 @@ class Command(BaseCommand):
                                 "indirizzo": v0.get("address", {}).get("line1"),
                                 "citta": city or None,
                                 "citta_normalizzata": slugify(city) if city else None,
-                                "stato_iso": country_code or None,
+                                "stato_iso": country_code_evt or None,
                                 "timezone": v0.get("timezone"),
                             },
                         )
@@ -496,8 +541,8 @@ class Command(BaseCommand):
                             luogo.citta = city
                             changed_luogo = True
 
-                        if country_code and luogo.stato_iso != country_code:
-                            luogo.stato_iso = country_code
+                        if country_code_evt and luogo.stato_iso != country_code_evt:
+                            luogo.stato_iso = country_code_evt
                             changed_luogo = True
 
                         if changed_luogo:
@@ -575,7 +620,6 @@ class Command(BaseCommand):
 
                             else:
                                 # Senza data non possiamo creare performance.
-                                # In questo caso saltiamo anche PerformancePiattaforma.
                                 map_status = upsert_evento_piattaforma_safe(
                                     plat=plat,
                                     evento=evento,
@@ -609,8 +653,6 @@ class Command(BaseCommand):
                             perf_created = False
 
                             if perf.evento_id != evento.id:
-                                # Se abbiamo trovato una performance già esistente,
-                                # usiamo il suo evento canonico.
                                 evento = perf.evento
 
                         else:
@@ -714,10 +756,12 @@ class Command(BaseCommand):
                     self.stdout.write(
                         f"...progress: processed={processed} failed={failed} "
                         f"created_evt={created_evt} created_perf={created_perf} "
-                        f"created_perf_map={created_perf_map}"
+                        f"created_perf_map={created_perf_map} "
+                        f"windows_rate_limited={windows_rate_limited}"  # PATCH E
                     )
 
         finally:
+            # PATCH E — summary finestre aggiunto al report finale.
             self.stdout.write(
                 self.style.SUCCESS(
                     "DB OK - "
@@ -726,7 +770,8 @@ class Command(BaseCommand):
                     f"updated eventi={updated_evt}, performances={updated_perf}, mappings={updated_map} | "
                     f"unchanged mappings={skipped_unchanged_map} | "
                     f"created perf_maps={created_perf_map}, updated perf_maps={updated_perf_map}, unchanged perf_maps={unchanged_perf_map} | "
-                    f"perf placeholder-midnight={perf_placeholder_midnight} time_tbd_marked={perf_time_tbd_marked}"
+                    f"perf placeholder-midnight={perf_placeholder_midnight} time_tbd_marked={perf_time_tbd_marked} | "
+                    f"windows: rate_limited={windows_rate_limited}"  # PATCH E
                 )
             )
             self.stdout.write(self.style.SUCCESS("=== SCRUB TICKETMASTER NEW END ==="))

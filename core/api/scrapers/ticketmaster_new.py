@@ -1,4 +1,3 @@
-
 """
 Ticketmaster Discovery API v2 - collector "completo" per IT
 Obiettivo: prendere TUTTI gli eventi (e tutte le date) che si terranno in Italia,
@@ -9,8 +8,16 @@ NOTE IMPORTANTI (senza inventare):
   Soluzione: windowing per intervalli di tempo (mese/settimana).
 - Alcuni eventi hanno localDate ma NON dateTime (TBA/TBD o orario non pubblicato).
   Lo script li include comunque; l'importer deciderà come persisterli.
+- Deep paging hard limit TM: max 5 pagine per finestra (5 × size = max ~975 elementi).
+  Se totalPages > 5, la finestra è troppo larga: ridurre step_days.
 
 Richiede env var: TICKETMASTER_API_KEY
+
+PATCH:
+  A - sleep tra finestre consecutive per ridurre pressione rate limit
+  B - hard_page_cap abbassato a 5 (limite reale TM); warning se finestra troppo larga
+  C - Retry-After parsing robusto (float invece di isdigit)
+  D - iter_all_events_windowed resiliente ai 429: finestra fallita loggata + pausa lunga + continua
 """
 
 from __future__ import annotations
@@ -24,6 +31,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, Optional, List
 
 TM_BASE = "https://app.ticketmaster.com/discovery/v2/events.json"
+
+# PATCH B — limite reale di deep paging Ticketmaster.
+# Oltre pagina 4 (0-indexed) la risposta è vuota o 400.
+TM_DEEP_PAGING_MAX_PAGES = 5
+
+# PATCH A — pausa minima tra finestre consecutive (secondi).
+# Ticketmaster misura le chiamate al minuto, non solo per singola richiesta.
+TM_INTER_WINDOW_SLEEP_S = 0.5
+
+# PATCH resilienza 429 — pausa lunga dopo una finestra fallita per rate limit.
+# 60 secondi lasciano raffreddare il quota TM prima di riprovare la finestra successiva.
+TM_RATE_LIMIT_BACKOFF_S = 60
 
 
 class TicketmasterError(RuntimeError):
@@ -49,7 +68,6 @@ def iso_z(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-
 def parse_dt_utc(dt_str: Optional[str]) -> Optional[datetime]:
     if not dt_str:
         return None
@@ -61,7 +79,6 @@ def stable_checksum(obj: Any) -> str:
     JSON stable representation. Non usa str(obj) per evitare checksum instabili.
     """
     s = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    # sha256 "inline" senza import extra per evitare dipendenze? no: usiamo hashlib
     import hashlib
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
@@ -72,18 +89,17 @@ class TMWindow:
     end: datetime
 
 
-
 def fetch_events_page(
     *,
     page: int = 0,
-    size: int = 195,  # 195 per stare larghi e ridurre edge/ultima pagina
+    size: int = 195,
     country_code: str = "IT",
     startDateTime: Optional[str] = None,
     endDateTime: Optional[str] = None,
     include_tba: bool = True,
     include_tbd: bool = True,
     source: Optional[str] = None,
-    keyword: Optional[str] = None,   # ✅ AGGIUNTO
+    keyword: Optional[str] = None,
     sort: str = "date,asc",
     timeout: int = 25,
     max_retries_429: int = 6,
@@ -106,26 +122,40 @@ def fetch_events_page(
     if source:
         params["source"] = source
     if keyword:
-        params["keyword"] = keyword   # ✅ AGGIUNTO
+        params["keyword"] = keyword
 
     for attempt in range(max_retries_429 + 1):
         r = requests.get(TM_BASE, params=params, timeout=timeout)
 
-        # rate limit
-        if r.status_code == 429 and attempt < max_retries_429:
-            retry_after = r.headers.get("Retry-After")
-            sleep_s = int(retry_after) if (retry_after and retry_after.isdigit()) else (2 ** attempt)
-            time.sleep(sleep_s)
-            continue
+        if r.status_code == 429:
+            if attempt < max_retries_429:
+                retry_after = r.headers.get("Retry-After")
 
-        # se è 400 vogliamo URL+body per capire subito il motivo
+                # PATCH C — parsing robusto: float() gestisce "1", "1.5", "60.0"
+                # isdigit() falliva su stringhe con decimali o spazi.
+                if retry_after:
+                    try:
+                        sleep_s = float(retry_after)
+                    except (ValueError, TypeError):
+                        sleep_s = float(2 ** attempt)
+                else:
+                    sleep_s = float(2 ** attempt)
+
+                time.sleep(sleep_s)
+                continue
+            else:
+                # PATCH 1 — ultimo tentativo ancora 429: solleviamo TicketmasterError
+                # esplicitamente invece di lasciare che r.raise_for_status() generi
+                # un generico requests.HTTPError, difficile da distinguere nei log.
+                raise TicketmasterError(
+                    f"Too many 429 responses from Ticketmaster (page={page}, attempts={max_retries_429 + 1})"
+                )
+
         if r.status_code == 400:
             raise TicketmasterError(f"400 Bad Request\nURL: {r.url}\nBODY: {r.text[:600]}")
 
         r.raise_for_status()
         return r.json()
-
-    raise TicketmasterError("Too many 429 responses from Ticketmaster")
 
 
 def iter_events_in_window(
@@ -136,18 +166,26 @@ def iter_events_in_window(
     include_tba: bool = True,
     include_tbd: bool = True,
     source: Optional[str] = None,
-    hard_page_cap: int = 20_000,
-    debug_window: bool = False,      # ✅ aggiunto
+    # PATCH B — hard_page_cap abbassato al limite reale TM (era 20_000, inutile e dannoso).
+    hard_page_cap: int = TM_DEEP_PAGING_MAX_PAGES,
+    debug_window: bool = False,
 ) -> Iterator[Dict[str, Any]]:
     page = 0
     total_pages: Optional[int] = None
-    printed_header = False           # ✅ aggiunto
+    printed_header = False
 
     start_str = iso_z(window.start)
     end_str = iso_z(window.end)
 
     while total_pages is None or page < total_pages:
+        # PATCH B — rispetta il limite reale di deep paging TM.
         if page >= hard_page_cap:
+            if debug_window:
+                print(
+                    f"[TM WINDOW] {start_str} -> {end_str} | "
+                    f"deep paging cap raggiunto a page={page} (totalPages={total_pages}). "
+                    f"Considera step_days più piccolo se totalPages > {TM_DEEP_PAGING_MAX_PAGES}."
+                )
             break
 
         data = fetch_events_page(
@@ -165,15 +203,21 @@ def iter_events_in_window(
         total_pages = page_info.get("totalPages")
         total_elements = page_info.get("totalElements")
 
-        # ✅ stampa una sola volta per finestra
         if debug_window and not printed_header:
             printed_header = True
-            approx_max_items = 1000  # deep paging TM
-            approx_pages_limit = max(1, approx_max_items // size)
+            # PATCH B — avvisa se la finestra ha più pagine del limite reale.
+            warning = ""
+            if total_pages is not None and total_pages > TM_DEEP_PAGING_MAX_PAGES:
+                warning = (
+                    f" ⚠️  FINESTRA TROPPO LARGA: totalPages={total_pages} > "
+                    f"cap={TM_DEEP_PAGING_MAX_PAGES}. "
+                    f"Ridurre step_days per non perdere eventi."
+                )
             print(
                 f"[TM WINDOW] {start_str} -> {end_str} | "
                 f"totalElements={total_elements} totalPages={total_pages} | "
-                f"size={size} | deepPagingMax~{approx_max_items} (pages~{approx_pages_limit})"
+                f"size={size} | deepPagingCap={hard_page_cap}"
+                f"{warning}"
             )
 
         embedded = data.get("_embedded") or {}
@@ -192,7 +236,7 @@ def build_windows(
     *,
     start_utc: datetime,
     end_utc: datetime,
-    step_days: int = 30,
+    step_days: int = 14,
 ) -> List[TMWindow]:
     if start_utc.tzinfo is None:
         start_utc = start_utc.replace(tzinfo=timezone.utc)
@@ -220,7 +264,7 @@ def iter_all_events_windowed(
     start_utc: Optional[datetime] = None,
     end_utc: Optional[datetime] = None,
     months_ahead: int = 18,
-    step_days: int = 30,
+    step_days: int = 14,
     size: int = 195,
     include_tba: bool = True,
     include_tbd: bool = True,
@@ -229,14 +273,18 @@ def iter_all_events_windowed(
     """
     Itera TUTTI gli eventi in IT nel range definito, spezzando per finestre.
 
-    Default: da "adesso" a +18 mesi.
+    Default: da "adesso" a +18 mesi, finestre da 14 giorni.
+
+    PATCH A — aggiunto sleep tra finestre per rispettare rate limit TM.
+    PATCH B — hard_page_cap=5 per rispettare il limite reale di deep paging.
+    PATCH D — TicketmasterError per singola finestra catturata: pausa lunga e continua.
+               Lo scraper non si ferma più con processed=0 al primo 429.
     """
     now = datetime.now(timezone.utc)
 
     if start_utc is None:
         start_utc = now
     if end_utc is None:
-        # +months_ahead approx (senza dipendenze): 30 giorni * months
         end_utc = now + timedelta(days=30 * months_ahead)
 
     windows = build_windows(start_utc=start_utc, end_utc=end_utc, step_days=step_days)
@@ -244,23 +292,41 @@ def iter_all_events_windowed(
     # Dedup globale su ID: un evento può apparire su finestre adiacenti.
     seen_ids: set[str] = set()
 
-    for w in windows:
-        for e in iter_events_in_window(
+    for w_idx, w in enumerate(windows):
+        # PATCH A — pausa tra finestre (non prima della prima).
+        if w_idx > 0:
+            time.sleep(TM_INTER_WINDOW_SLEEP_S)
+
+        # PATCH resilienza 429 — se una singola finestra fallisce per rate limit,
+        # logghiamo, aspettiamo più a lungo e continuiamo con la finestra successiva.
+        # Lo scraper non si ferma più con processed=0 al primo 429.
+        try:
+            for e in iter_events_in_window(
                 window=w,
                 country_code=country_code,
                 size=size,
                 include_tba=include_tba,
                 include_tbd=include_tbd,
                 source=source,
-                debug_window=True,  # ✅
-        ):
-            eid = e.get("id")
-            if not eid:
-                continue
-            if eid in seen_ids:
-                continue
-            seen_ids.add(eid)
-            yield e
+                debug_window=True,
+            ):
+                eid = e.get("id")
+                if not eid:
+                    continue
+                if eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                yield e
+
+        except TicketmasterError as tm_err:
+            start_str = iso_z(w.start)
+            end_str = iso_z(w.end)
+            print(
+                f"[TM WINDOW ERROR] finestra {start_str} -> {end_str} fallita: {tm_err}. "
+                f"Pausa {TM_RATE_LIMIT_BACKOFF_S}s prima della finestra successiva."
+            )
+            time.sleep(TM_RATE_LIMIT_BACKOFF_S)
+
 
 def probe_windows(
     *,
@@ -272,6 +338,10 @@ def probe_windows(
     include_tbd: bool = True,
     source: Optional[str] = None,
 ):
+    """
+    Utility di diagnostica: stampa totalElements e totalPages per ogni finestra
+    senza scaricare gli eventi. Utile per calibrare step_days.
+    """
     now = datetime.now(timezone.utc)
     end_utc = now + timedelta(days=30 * months_ahead)
     windows = build_windows(start_utc=now, end_utc=end_utc, step_days=step_days)
@@ -294,4 +364,12 @@ def probe_windows(
         total_pages = page_info.get("totalPages")
         total_elements = page_info.get("totalElements")
 
-        print(f"[TM PROBE] {start_str} -> {end_str} | totalElements={total_elements} totalPages={total_pages} size={size}")
+        warning = ""
+        if total_pages is not None and total_pages > TM_DEEP_PAGING_MAX_PAGES:
+            warning = f" ⚠️  TROPPO LARGA (ridurre step_days)"
+
+        print(
+            f"[TM PROBE] {start_str} -> {end_str} | "
+            f"totalElements={total_elements} totalPages={total_pages} "
+            f"size={size}{warning}"
+        )
