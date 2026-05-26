@@ -14,7 +14,71 @@ class Command(BaseCommand):
     help = "Scrub automatico TicketOne: scopre eventi, apre dettagli, pulisce e importa nel DB"
 
     START_URLS = [
+        # Pagina principale concerti
         "https://www.ticketone.it/events/concerti-55/",
+        # Sottocategorie concerti
+        "https://www.ticketone.it/events/pop-rock-84/",
+        "https://www.ticketone.it/events/festival-87/",
+        "https://www.ticketone.it/events/hip-hop-rap-98/",
+        "https://www.ticketone.it/events/classica-opera-56/",
+        "https://www.ticketone.it/events/jazz-blues-57/",
+    ]
+
+    CATEGORY_HINTS = {
+        "concerti-55": "concerti",
+        "pop-rock-84": "concerti",
+        "festival-87": "concerti",
+        "hip-hop-rap-98": "concerti",
+        "classica-opera-56": "classica",
+        "jazz-blues-57": "concerti",
+    }
+
+    # Pattern negli slug URL che identificano eventi non-concerto.
+    # Filtriamo PRIMA di aprire il browser: risparmia tempo e riduce rumore.
+    NOISE_URL_PATTERNS = [
+        # Tessere fidelity e abbonamenti calcio
+        "calcio--",
+        "fidelity",
+        "membership",
+        # Musei, mostre, visite guidate
+        "visita-guidata",
+        "visite-guidate",
+        "guided-tour",
+        "grotte-di-castellana",
+        "galleria-colonna",
+        "museo-ferragamo",
+        "museo-archeologico",
+        "cinecitta-si-mostra",
+        "chiharu-shiota",
+        "liberty-larte",
+        "palazzo-martinengo-cesaresco",
+        "palazzo-colonna",
+        "jack-vettriano",
+        "galleria-borghese",
+        # Sport motoristici
+        "campionato-italiano-velocita",
+        "superbike-world-championship",
+        "gran-premio-ditalia",
+        "mugello-gran-premio",
+        "autodromo-internazionale-del-mugello",
+        # Sport vari non-concerto
+        "davis-cup-finals",
+        "cev-eurovolley",
+        "internazionali-bnl",
+        "bnl-italy-major-premier-padel",
+        "nitto-atp-finals",
+        "six-nations",
+        "amichevoli-nazionali-pallavolo",
+        "grand-prix-zeus",
+        "iws-the-american-wrestling",
+        "iws-showdown",
+        "partita-del-cuore",
+        "fim-superbike",
+        # Attrazioni / parchi / monumenti generici (biglietti ingresso, non concerti)
+        "reggia-di-caserta-reggia-di-caserta",
+        "parco-archeologico-neapolis",
+        "palazzo-velli",
+        "mao-museo",
     ]
 
     def add_arguments(self, parser):
@@ -35,27 +99,36 @@ class Command(BaseCommand):
             help="Pausa massima tra pagine discovery"
         )
 
-    def _build_page_urls(self, pages: int) -> list[str]:
-        """
-        Costruisce una lista prudente di URL TicketOne da cui partire.
+    def _get_category_hint(self, url: str) -> str:
+        for slug, hint in self.CATEGORY_HINTS.items():
+            if slug in url:
+                return hint
+        return "concerti"
 
-        Per ora usiamo la pagina concerti principale.
-        Se TicketOne accetta ?page=N, proviamo anche pagine successive.
-        """
+    def _build_page_urls(self, pages: int) -> list[tuple[str, str]]:
         urls = []
-
         for base_url in self.START_URLS:
-            urls.append(base_url)
-
+            hint = self._get_category_hint(base_url)
+            urls.append((base_url, hint))
             for page in range(2, pages + 1):
-                urls.append(f"{base_url}?page={page}")
-
+                urls.append((f"{base_url}?page={page}", hint))
         return urls
+
+    def _is_noise_event(self, item) -> bool:
+        """
+        Scarta eventi non-concerto identificabili dallo slug URL
+        PRIMA di aprire il browser.
+
+        Questi eventi entrano dalla discovery ma non ci interessano
+        e non avranno mai una location valida per noi.
+        Filtrare qui risparmia un'apertura Chromium per ciascuno.
+        """
+        url_low = (item.event_url or "").lower()
+        return any(pattern in url_low for pattern in self.NOISE_URL_PATTERNS)
 
     def _is_extra_event(self, item) -> bool:
         """
-        Scarta eventi che non sono concerti veri:
-        package, VIP, premium, parcheggi, party terrace ecc.
+        Scarta eventi non-concerto: package, VIP, premium, parcheggi ecc.
         """
         title_low = (item.title or "").lower()
         url_low = (item.event_url or "").lower()
@@ -74,7 +147,6 @@ class Command(BaseCommand):
         ]
 
         text = f"{title_low} {url_low}"
-
         return any(keyword in text for keyword in skip_keywords)
 
     def _has_valid_location(self, item) -> bool:
@@ -87,28 +159,20 @@ class Command(BaseCommand):
     def _dedupe_items(self, items):
         unique = []
         seen = set()
-
         for item in items:
             key = item.external_id or item.event_url
-
             if key in seen:
                 continue
-
             seen.add(key)
             unique.append(item)
-
         return unique
 
     def _sleep_between_pages(self, sleep_min: float, sleep_max: float, verbose: bool):
         pause = random.uniform(sleep_min, sleep_max)
-
         if verbose:
             self.stdout.write(
-                self.style.WARNING(
-                    f"[DISCOVERY SLEEP] {pause:.2f}s"
-                )
+                self.style.WARNING(f"[DISCOVERY SLEEP] {pause:.2f}s")
             )
-
         time.sleep(pause)
 
     def handle(self, *args, **options):
@@ -134,17 +198,19 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.WARNING(
-                f"[DISCOVERY URLS] {len(page_urls)} pagine da controllare"
+                f"[DISCOVERY URLS] {len(page_urls)} pagine da controllare "
+                f"({len(self.START_URLS)} categorie x {pages} pagina/e)"
             )
         )
 
-        for idx, page_url in enumerate(page_urls, start=1):
+        for idx, (page_url, category_hint) in enumerate(page_urls, start=1):
             if limit and len(discovered) >= limit:
                 break
 
             self.stdout.write(
                 self.style.WARNING(
-                    f"[DISCOVERY PAGE] {idx}/{len(page_urls)} {page_url}"
+                    f"[DISCOVERY PAGE] {idx}/{len(page_urls)} "
+                    f"category={category_hint} url={page_url}"
                 )
             )
 
@@ -153,7 +219,7 @@ class Command(BaseCommand):
                 items = parse_event_links(
                     html=html,
                     base_url=page_url,
-                    category_hint="concerti",
+                    category_hint=category_hint,
                 )
 
                 self.stdout.write(
@@ -194,17 +260,40 @@ class Command(BaseCommand):
         )
 
         if not discovered:
-            self.stdout.write(
-                self.style.WARNING("[STOP] nessun evento trovato")
-            )
+            self.stdout.write(self.style.WARNING("[STOP] nessun evento trovato"))
             return
 
-        results = scraper.enrich_events(discovered)
+        # ----------------------------------------------------------------
+        # Filtro pre-browser: scarta URL che sappiamo essere rumore.
+        # Applicato PRIMA di enrich_events per non aprire Chromium inutilmente.
+        # ----------------------------------------------------------------
+        pre_noise_count = 0
+        filtered_for_browser = []
+        for item in discovered:
+            if self._is_noise_event(item):
+                pre_noise_count += 1
+                if verbose:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"[SKIP NOISE PRE-BROWSER] title={item.title} "
+                            f"external_id={item.external_id}"
+                        )
+                    )
+            else:
+                filtered_for_browser.append(item)
+
+        if pre_noise_count:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"[PRE-BROWSER FILTER] scartati {pre_noise_count} eventi rumore, "
+                    f"restano {len(filtered_for_browser)} da aprire con browser"
+                )
+            )
+
+        results = scraper.enrich_events(filtered_for_browser)
 
         self.stdout.write(
-            self.style.SUCCESS(
-                f"[RESULTS] {len(results)} eventi processati"
-            )
+            self.style.SUCCESS(f"[RESULTS] {len(results)} eventi processati")
         )
 
         ok_count = sum(1 for item in results if item.detail_status == "ok")
@@ -290,6 +379,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.WARNING(
                 f"[SUMMARY] imported={imported} "
+                f"skipped_noise={pre_noise_count} "
                 f"skipped_extra={skipped_extra} "
                 f"skipped_location={skipped_location} "
                 f"skipped_blocked={skipped_blocked} "
@@ -300,9 +390,7 @@ class Command(BaseCommand):
 
         if not dry_run:
             self.stdout.write(
-                self.style.SUCCESS(
-                    f"[DB IMPORTED] {imported} eventi"
-                )
+                self.style.SUCCESS(f"[DB IMPORTED] {imported} eventi")
             )
 
         self.stdout.write(self.style.SUCCESS("[DONE]"))

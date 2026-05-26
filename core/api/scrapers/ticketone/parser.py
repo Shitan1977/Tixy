@@ -86,6 +86,11 @@ def infer_location_from_ticketone_url(url: Optional[str]) -> tuple[Optional[str]
 
     La logica usa lo slug dell'URL TicketOne.
     Serve soprattutto per lo scrub automatico.
+
+    NOTA: le entry con city=None sono venue note ma non localizzabili
+    con certezza dallo slug. In quel caso la venue viene impostata
+    ma la città rimane None → l'evento verrà ancora scartato da
+    _has_valid_location. Questo è corretto: non inventiamo città.
     """
 
     url = normalize_text(url)
@@ -95,12 +100,24 @@ def infer_location_from_ticketone_url(url: Optional[str]) -> tuple[Optional[str]
     low = url.lower()
 
     location_map = [
+        # ----------------------------------------------------------------
         # Roma
+        # ----------------------------------------------------------------
         ("tor-vergata", "Roma", "Tor Vergata"),
         ("stadio-olimpico", "Roma", "Stadio Olimpico"),
         ("ippodromo-le-capannelle", "Roma", "Ippodromo Le Capannelle"),
+        ("circo-massimo", "Roma", "Circo Massimo"),
+        ("teatro-dellopera-di-roma", "Roma", "Teatro dell'Opera di Roma"),
+        ("teatro-sala-umberto", "Roma", "Teatro Sala Umberto"),
+        ("palazzo-dello-sport", "Roma", "Palazzo dello Sport"),
+        ("foro-italico", "Roma", "Foro Italico"),
+        ("palazzo-colonna-galleria-colonna", "Roma", "Galleria Colonna"),
+        ("palazzo-velli", "Roma", "Palazzo Velli"),
+        ("cinecitta-roma", "Roma", "Cinecittà"),
 
-        # Milano
+        # ----------------------------------------------------------------
+        # Milano e hinterland
+        # ----------------------------------------------------------------
         ("unipol-dome-arena-milano", "Milano", "Unipol Dome"),
         ("unipol-dome", "Milano", "Unipol Dome"),
         ("fiera-milano-live", "Milano", "Fiera Milano Live"),
@@ -110,43 +127,121 @@ def infer_location_from_ticketone_url(url: Optional[str]) -> tuple[Optional[str]
         ("san-siro", "Milano", "Stadio San Siro"),
         ("legend-club", "Milano", "Legend Club"),
         ("piazza-sempione", "Milano", "Piazza Sempione"),
+        ("fabrique", "Milano", "Fabrique"),
+        ("nxt-station", "Milano", "NXT Station"),
+        ("teatro-clerici", "Milano", "Teatro Clerici"),
+        ("teatro-infinity", "Milano", "Teatro Infinity"),
+        ("villa-erba", "Cernobbio", "Villa Erba"),
 
+        # ----------------------------------------------------------------
         # Torino / Piemonte
+        # ----------------------------------------------------------------
         ("allianz-stadium", "Torino", "Allianz Stadium"),
         ("inalpi-arena", "Torino", "Inalpi Arena"),
-        ("kioene-arena", "Padova", "Kioene Arena"),
+        ("piazza-castello", "Torino", "Piazza Castello"),
+        ("palazzetto-dello-sport-borgaro", "Borgaro Torinese", "Palazzetto dello Sport"),
         ("castello-di-lagnasco", "Lagnasco", "Castello di Lagnasco"),
+        ("piazza-alfieri", "Asti", "Piazza Alfieri"),
 
-        # Emilia / Veneto / Friuli
-        ("parco-ragazzi-del-99", "Bassano del Grappa", "Parco Ragazzi del '99"),
+        # ----------------------------------------------------------------
+        # Veneto / Trentino / Friuli
+        # ----------------------------------------------------------------
+        ("kioene-arena", "Padova", "Kioene Arena"),
+        ("castello-carrarese", "Padova", "Castello Carrarese"),
+        ("parcheggio-nord-stadio-euganeo", "Padova", "Stadio Euganeo"),
         ("arena-di-verona", "Verona", "Arena di Verona"),
-        ("villa-manin", "Codroipo", "Villa Manin"),
+        ("castello-di-villafranca", "Verona", "Castello di Villafranca"),
         ("teatro-romano-fiesole", "Fiesole", "Teatro Romano di Fiesole"),
-        ("teatro-europauditorium", "Bologna", "Teatro EuropAuditorium"),
-        ("castello-estense", "Ferrara", "Castello Estense"),
+        ("villa-manin", "Codroipo", "Villa Manin"),
+        ("bluenergy-stadium", "Udine", "Bluenergy Stadium"),
+        ("palaunical-arena", "Udine", "PalaUnical Arena"),
+        ("doss-del-sabion", "Trento", "Doss del Sabion"),
+        ("lago-superiore-di-fusine", "Tarvisio", "Lago Superiore di Fusine"),
+        ("forte-di-bard", "Bard", "Forte di Bard"),
 
+        # ----------------------------------------------------------------
+        # Emilia-Romagna
+        # ----------------------------------------------------------------
+        ("teatro-europauditorium", "Bologna", "Teatro EuropAuditorium"),
+        ("unipol-arena", "Bologna", "Unipol Arena"),
+        ("bolognafiere-arena", "Bologna", "BolognaFiere Arena"),
+        ("castello-estense", "Ferrara", "Castello Estense"),
+        ("parco-urbano-bassani", "Ferrara", "Parco Urbano Bassani"),
+        ("piazza-ariostea", "Ferrara", "Piazza Ariostea"),
+        ("autodromo-internazionale-enzo-e-dino-ferrari", "Imola", "Autodromo Enzo e Dino Ferrari"),
+        ("parco-san-valentino", "Parma", "Parco San Valentino"),
+
+        # ----------------------------------------------------------------
         # Toscana / Liguria
+        # ----------------------------------------------------------------
         ("cava-di-roselle", "Grosseto", "Cava di Roselle"),
         ("bussoladomani", "Lido di Camaiore", "Bussoladomani"),
         ("mura-di-lucca", "Lucca", "Mura di Lucca"),
-        ("piazza-alfieri", "Asti", "Piazza Alfieri"),
+        ("ippodromo-del-visarno", "Firenze", "Ippodromo del Visarno"),
+        ("teatro-cartiere-carrara-extuscanyhall", "Firenze", "ExTuscanyhall"),
+        ("area-verde-capannori", "Capannori", "Area Verde Capannori"),
+        ("autodromo-internazionale-del-mugello", "Scarperia", "Autodromo del Mugello"),
         ("politeama-genovese", "Genova", "Politeama Genovese"),
+        ("arena-mare-area-porto-antico", "Genova", "Arena del Mare Porto Antico"),
 
-        # Centro / Sud / Isole
+        # ----------------------------------------------------------------
+        # Lombardia (fuori Milano)
+        # ----------------------------------------------------------------
+        ("teatro-del-vittoriale", "Gardone Riviera", "Teatro del Vittoriale"),
+        ("cremona-circuit", "Cremona", "Cremona Circuit"),
+        ("palazzo-martinengo-cesaresco", "Brescia", "Palazzo Martinengo Cesaresco"),
+        ("palazzo-te", "Mantova", "Palazzo Te"),
+        ("choruslife-arena", "Bergamo", "ChorusLife Arena"),
+        ("mao", "Torino", "MAO - Museo d'Arte Orientale"),
+
+        # ----------------------------------------------------------------
+        # Umbria / Marche / Abruzzo
+        # ----------------------------------------------------------------
+        ("anfiteatro-giovanni-paolo-ii", "Assisi", "Anfiteatro Giovanni Paolo II"),
+        ("giardini-del-frontone", "Perugia", "Giardini del Frontone"),
         ("arena-santa-giuliana", "Perugia", "Arena Santa Giuliana"),
+
+        # ----------------------------------------------------------------
+        # Campania / Basilicata
+        # ----------------------------------------------------------------
         ("anfiteatro-scavi-di-pompei", "Pompei", "Anfiteatro degli Scavi di Pompei"),
         ("anfiteatro-degli-scavi", "Pompei", "Anfiteatro degli Scavi di Pompei"),
-        ("anfiteatro-falcone-e-borsellino", "Zafferana Etnea", "Anfiteatro Falcone e Borsellino"),
         ("reggia-di-caserta", "Caserta", "Reggia di Caserta"),
+        ("arena-del-mare", "Napoli", "Arena del Mare"),
+        ("arena-campo-marte", "Napoli", "Arena Campo Marte"),
+        ("piazza-del-plebiscito", "Napoli", "Piazza del Plebiscito"),
+        ("palateknoship", "Napoli", "PalaTeknoShip"),
+
+        # ----------------------------------------------------------------
+        # Puglia / Calabria
+        # ----------------------------------------------------------------
         ("fiera-del-levante", "Bari", "Fiera del Levante"),
+        ("grotte-di-castellana", "Castellana Grotte", "Grotte di Castellana"),
+
+        # ----------------------------------------------------------------
+        # Sicilia / Sardegna
+        # ----------------------------------------------------------------
         ("villa-bellini", "Catania", "Villa Bellini"),
+        ("anfiteatro-falcone-e-borsellino", "Zafferana Etnea", "Anfiteatro Falcone e Borsellino"),
+        ("teatro-antico-di-taormina", "Taormina", "Teatro Antico di Taormina"),
+        ("teatro-greco-di-tindari", "Tindari", "Teatro Greco di Tindari"),
+        ("parco-archeologico-neapolis", "Siracusa", "Parco Archeologico Neapolis"),
         ("olbia-arena", "Olbia", "Olbia Arena"),
 
-        # Altri luoghi
+        # ----------------------------------------------------------------
+        # Venue con city=None: slug non rivela la città con certezza.
+        # Vengono comunque inserite così il fallback popola almeno venue,
+        # ma _has_valid_location le scarterà ancora finché city è None.
+        # Utile come base per future espansioni.
+        # ----------------------------------------------------------------
         ("parco-della-pace", None, "Parco della Pace"),
         ("teatro-nuovo", None, "Teatro Nuovo"),
         ("stadio-comunale", None, "Stadio Comunale"),
-        ("parco-urbano-bassani", "Ferrara", "Parco Urbano Bassani"),
+        ("ex-base-nato", None, "Ex Base NATO"),
+        ("piazzale-zenith", None, "Piazzale Zenith"),
+        ("piazza-grande", None, "Piazza Grande"),
+        ("stadio-a-checcarini", None, "Stadio A. Checcarini"),
+        ("area-eventi-selvapiana", None, "Area Eventi Selvapiana"),
     ]
 
     for slug, city, venue in location_map:

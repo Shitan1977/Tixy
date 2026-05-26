@@ -8,9 +8,17 @@ from .parser import parse_event_detail, parse_event_links
 from .schemas import TicketOneEventItem
 
 
-# Per ora usiamo SOLO la sorgente stabile
+# Tutte le categorie TicketOne da cui fare discovery.
+# Allineato con START_URLS in scrub_ticketone_full.py.
 DEFAULT_START_URLS = [
+    # Pagina principale concerti
     ("https://www.ticketone.it/events/concerti-55/", "concerti"),
+    # Sottocategorie
+    ("https://www.ticketone.it/events/pop-rock-84/", "concerti"),
+    ("https://www.ticketone.it/events/festival-87/", "concerti"),
+    ("https://www.ticketone.it/events/hip-hop-rap-98/", "concerti"),
+    ("https://www.ticketone.it/events/classica-opera-56/", "classica"),
+    ("https://www.ticketone.it/events/jazz-blues-57/", "concerti"),
 ]
 
 
@@ -25,7 +33,7 @@ class TicketOneScraper:
 
         for start_url, category_hint in DEFAULT_START_URLS:
             if self.verbose:
-                print(f"[DISCOVERY] start_url={start_url}")
+                print(f"[DISCOVERY] start_url={start_url} category={category_hint}")
 
             html = self.client.get_html(start_url)
             items = parse_event_links(html, start_url, category_hint=category_hint)
