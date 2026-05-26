@@ -9,6 +9,12 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+# Piattaforme non ancora supportate dallo scanner generico.
+# Vengono skippate prima di chiamare check_platform_availability,
+# evitando log inutili e falsi contatori.
+_NOT_READY_PLATFORMS = {"fansale", "vivaticket"}
+
+
 class Command(BaseCommand):
     help = "Scanner generico PRO: legge i monitoraggi PRO e controlla le piattaforme collegate."
 
@@ -109,15 +115,24 @@ class Command(BaseCommand):
 
         self.stdout.write(f"[PRO] monitoraggi PRO attivi trovati: {total}")
 
+        # --- contatori principali ---
         processed = 0
         skipped_no_target = 0
         skipped_no_platform = 0
         links_found = 0
 
+        # --- contatori per piattaforma ---
         ticketmaster_count = 0
         ticketone_count = 0
         fansale_count = 0
         other_count = 0
+
+        # --- contatori per esito ---
+        notified = 0            # email inviata con successo
+        deduped = 0             # già notificato oggi, skip
+        unknown_count = 0       # availability=unknown (inclusi 401)
+        unavailable_count = 0   # availability=unavailable
+        skipped_not_ready = 0   # piattaforma non ancora supportata
 
         for monitoraggio in qs:
             processed += 1
@@ -280,6 +295,22 @@ class Command(BaseCommand):
                     f"url={url}"
                 )
 
+                # PATCH 2: skip anticipato per piattaforme non ancora supportate.
+                # Evitiamo di chiamare check_platform_availability e di generare
+                # log "availability=unknown reason=fansale_checker_not_ready" per
+                # ogni monitoraggio, che non porta nessuna informazione utile.
+                if platform_name in _NOT_READY_PLATFORMS:
+                    skipped_not_ready += 1
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"[SKIP NOT READY] platform={platform_name} "
+                            f"monitoraggio={monitoraggio.id}: checker non ancora disponibile"
+                        )
+                    )
+                    if sleep_seconds > 0:
+                        time.sleep(sleep_seconds)
+                    continue
+
                 result = check_platform_availability(
                     platform_name=platform_name,
                     url=url,
@@ -304,11 +335,30 @@ class Command(BaseCommand):
                         )
                     )
 
+                status_code = result.get("status_code")
+
                 self.stdout.write(
                     f"[RESULT] platform={platform_name} "
                     f"availability={result['availability']} "
-                    f"reason={result['reason']}"
+                    f"reason={result['reason']} "
+                    f"status_code={status_code}"
                 )
+
+                # PATCH 3: HTTP 401 — log esplicito e skip immediato.
+                # Ticketmaster .com risponde 401 su alcuni URL internazionali.
+                # Non è un segnale di disponibilità né di indisponibilità:
+                # trattiamo come unknown e non notifichiamo.
+                if status_code == 401:
+                    unknown_count += 1
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"[SKIP 401] platform={platform_name} "
+                            f"monitoraggio={monitoraggio.id} url={url}"
+                        )
+                    )
+                    if sleep_seconds > 0:
+                        time.sleep(sleep_seconds)
+                    continue
 
                 if result["availability"] == "available":
                     dedupe_key = build_generic_dedupe_key(
@@ -324,6 +374,7 @@ class Command(BaseCommand):
                     ).exists()
 
                     if already_sent:
+                        deduped += 1  # PATCH 6: contatore dedup
                         self.stdout.write(
                             self.style.WARNING(
                                 f"[DEDUP] monitoraggio={monitoraggio.id} "
@@ -362,6 +413,8 @@ class Command(BaseCommand):
                                     f"[SKIP EMAIL PREF] user={utente.id} email={utente.email}"
                                 )
                             )
+                            if sleep_seconds > 0:
+                                time.sleep(sleep_seconds)
                             continue
 
                         to_email = getattr(utente, "email", None)
@@ -372,6 +425,8 @@ class Command(BaseCommand):
                                     f"[SKIP NO EMAIL] user={utente.id}"
                                 )
                             )
+                            if sleep_seconds > 0:
+                                time.sleep(sleep_seconds)
                             continue
 
                         ok, err = send_email_with_retry(
@@ -391,6 +446,8 @@ class Command(BaseCommand):
                                     status="SENT",
                                     message=message,
                                 )
+
+                                notified += 1  # PATCH 6: contatore notifiche inviate
 
                                 self.stdout.write(
                                     self.style.SUCCESS(
@@ -414,19 +471,33 @@ class Command(BaseCommand):
                                     )
                                 )
 
+                elif result["availability"] == "unavailable":
+                    unavailable_count += 1  # PATCH 6
+
+                else:
+                    # availability=unknown: nessuna azione, solo contatore
+                    unknown_count += 1  # PATCH 6
+
                 if sleep_seconds > 0:
                     time.sleep(sleep_seconds)
 
+        # PATCH 6: riepilogo finale con contatori chiari
         self.stdout.write("")
         self.stdout.write(self.style.SUCCESS("[DONE]"))
-        self.stdout.write(f"processed={processed}")
-        self.stdout.write(f"links_found={links_found}")
-        self.stdout.write(f"ticketmaster_links={ticketmaster_count}")
-        self.stdout.write(f"ticketone_links={ticketone_count}")
-        self.stdout.write(f"fansale_links={fansale_count}")
-        self.stdout.write(f"other_links={other_count}")
-        self.stdout.write(f"skipped_no_target={skipped_no_target}")
-        self.stdout.write(f"skipped_no_platform={skipped_no_platform}")
+        self.stdout.write(f"processed           ={processed}")
+        self.stdout.write(f"links_found         ={links_found}")
+        self.stdout.write(f"  ticketmaster_links ={ticketmaster_count}")
+        self.stdout.write(f"  ticketone_links    ={ticketone_count}")
+        self.stdout.write(f"  fansale_links      ={fansale_count}")
+        self.stdout.write(f"  other_links        ={other_count}")
+        self.stdout.write("")
+        self.stdout.write(f"notified            ={notified}")
+        self.stdout.write(f"deduped             ={deduped}")
+        self.stdout.write(f"unknown             ={unknown_count}")
+        self.stdout.write(f"unavailable         ={unavailable_count}")
+        self.stdout.write(f"skipped_not_ready   ={skipped_not_ready}")
+        self.stdout.write(f"skipped_no_target   ={skipped_no_target}")
+        self.stdout.write(f"skipped_no_platform ={skipped_no_platform}")
 
 
 def normalize_platform_name(name):
@@ -525,6 +596,10 @@ def check_platform_availability(platform_name, url, verbose=False):
 
     In base alla piattaforma, chiama il controllo corretto.
     Tutti i controlli restituiscono un dizionario standard.
+
+    Nota: fansale e vivaticket sono in _NOT_READY_PLATFORMS e vengono
+    skippate prima di arrivare qui. Questi branch restano come fallback
+    nel caso in cui _NOT_READY_PLATFORMS venga modificata.
     """
 
     if platform_name == "ticketmaster":
@@ -656,13 +731,18 @@ def check_ticketone(url, verbose=False):
 
 def ticketone_result_is_available(result):
     """
-    Replica prudente della logica già usata nello scanner TicketOne.
+    Segnale forte richiesto per dichiarare available un risultato TicketOne.
 
-    Non basta che la pagina esista.
-    Per dire available vogliamo almeno un segnale utile:
-    - prezzo minimo
-    - testo prezzo
-    - detail_status ok
+    Una pagina può essere letta correttamente (detail_status=ok) ma non avere
+    nessun prezzo esposto: in quel caso non è un segnale di disponibilità reale
+    e restituiamo unknown per evitare falsi positivi.
+
+    Condizioni sufficienti:
+    - min_price presente  → prezzo numerico estratto
+    - raw_price_text presente → testo prezzo trovato nel DOM
+
+    detail_status=ok da solo NON è sufficiente: viene loggato da
+    build_ticketone_reason ma non usato per inviare alert.
     """
 
     if result.get("min_price") is not None:
@@ -671,10 +751,8 @@ def ticketone_result_is_available(result):
     if result.get("raw_price_text"):
         return True
 
-    if result.get("detail_status") == "ok":
-        return True
-
     return False
+
 
 def send_email_with_retry(
     *,
@@ -713,6 +791,8 @@ def send_email_with_retry(
                 time.sleep(base_wait * attempt)
 
     return False, last_err
+
+
 def build_ticketone_reason(result):
     """
     Crea una reason leggibile per il log.
@@ -735,17 +815,25 @@ def build_ticketone_reason(result):
 
 def build_generic_dedupe_key(*, monitoraggio, user, platform_name, result):
     """
-    Crea una chiave giornaliera per evitare più notifiche uguali.
+    Chiave giornaliera per deduplicare notifiche.
+
+    La `reason` è esclusa intenzionalmente: lo stesso evento/piattaforma/giorno
+    non deve generare più notifiche anche se la reason cambia tra run distinti
+    (es. "strong_positive_keyword" vs "ticketone_min_price_found").
+    Includere la reason nella chiave causerebbe notifiche duplicate per lo
+    stesso utente/evento nello stesso giorno.
+
+    Formato:
+    generic:{platform_name}:mon:{monitoraggio.id}:user:{user.id}:{YYYY-MM-DD}
 
     Esempio:
-    generic:ticketmaster:strong_positive_keyword:mon:51:user:43:2026-05-05
+    generic:ticketmaster:mon:51:user:43:2026-05-05
     """
 
     day = timezone.now().date().isoformat()
-    reason = result.get("reason") or "AVAILABLE"
 
     return (
-        f"generic:{platform_name}:{reason}:"
+        f"generic:{platform_name}:"
         f"mon:{monitoraggio.id}:user:{user.id}:{day}"
     )
 
