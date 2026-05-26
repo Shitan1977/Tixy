@@ -1,0 +1,42 @@
+# Lista seed URL artista TicketOne per scrub_ticketone_artists.
+#
+# Formato: una URL per riga.
+# Righe vuote e righe che iniziano con # vengono ignorate.
+# Il parametro ?affiliate=... viene rimosso automaticamente.
+#
+# Aggiungere qui gli artisti rilevanti per i vostri alert PRO.
+# Il comando legge questo file a ogni esecuzione, quindi
+# basta modificare il file senza toccare il codice.
+
+https://www.ticketone.it/artist/jovanotti/
+https://www.ticketone.it/artist/vasco-rossi/
+https://www.ticketone.it/artist/max-pezzali/
+https://www.ticketone.it/artist/ligabue/
+https://www.ticketone.it/artist/cesare-cremonini/
+https://www.ticketone.it/artist/irama/
+https://www.ticketone.it/artist/sfera-ebbasta/
+https://www.ticketone.it/artist/geolier/
+https://www.ticketone.it/artist/tiziano-ferro/
+https://www.ticketone.it/artist/negramaro/
+https://www.ticketone.it/artist/giorgia/
+https://www.ticketone.it/artist/achille-lauro/
+https://www.ticketone.it/artist/salmo/
+https://www.ticketone.it/artist/caparezza/
+https://www.ticketone.it/artist/fiorella-mannoia/
+https://www.ticketone.it/artist/emma/
+https://www.ticketone.it/artist/blanco/
+https://www.ticketone.it/artist/tedua/
+https://www.ticketone.it/artist/gigi-d-alessio/
+https://www.ticketone.it/artist/laura-pausini/
+https://www.ticketone.it/artist/pinguini-tattici-nucleari/
+https://www.ticketone.it/artist/brunori-sas/
+https://www.ticketone.it/artist/claudio-baglioni/
+https://www.ticketone.it/artist/pooh/
+https://www.ticketone.it/artist/antonio-venditti/
+https://www.ticketone.it/artist/biagio-antonacci/
+https://www.ticketone.it/artist/il-volo/
+https://www.ticketone.it/artist/moda/
+https://www.ticketone.it/artist/coez/
+https://www.ticketone.it/artist/alfa/
+https://www.ticketone.it/artist/shiva/
+https://www.ticketone.it/artist/olly/
