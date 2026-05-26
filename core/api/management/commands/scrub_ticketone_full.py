@@ -36,10 +36,14 @@ class Command(BaseCommand):
     # Pattern negli slug URL che identificano eventi non-concerto.
     # Filtriamo PRIMA di aprire il browser: risparmia tempo e riduce rumore.
     NOISE_URL_PATTERNS = [
-        # Tessere fidelity e abbonamenti calcio
+        # Tessere fidelity e abbonamenti calcio.
+        # Il pattern "--\d" cattura tutti gli slug TicketOne senza nome venue
+        # (doppio trattino finale = placeholder vuoto, es. ssc-napoli--12341442).
+        # Sono invariabilmente tessere fidelity, abbonamenti squadre o placeholder.
         "calcio--",
         "fidelity",
         "membership",
+        "--",   # slug senza venue: /event/nome-squadra--NNNNNNN/
         # Musei, mostre, visite guidate
         "visita-guidata",
         "visite-guidate",
