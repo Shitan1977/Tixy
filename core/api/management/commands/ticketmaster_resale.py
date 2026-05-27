@@ -109,7 +109,10 @@ def fetch_tm_eu_prices(
         # rate limit
         if r.status_code == 429 and attempt < max_retries_429:
             retry_after = r.headers.get("Retry-After")
-            sleep_s = int(retry_after) if (retry_after and retry_after.isdigit()) else (2 ** attempt)
+            try:
+                sleep_s = float(retry_after) if retry_after else (2 ** attempt)
+            except Exception:
+                sleep_s = 2 ** attempt
             time.sleep(sleep_s)
             continue
 
@@ -288,12 +291,18 @@ _NEGATIVES = [
     "no tickets available",
 ]
 
-_POSITIVES = [
+# Attenzione:
+# questi sono solo segnali deboli nel contesto resale.
+# NON bastano per dichiarare available una rivendita.
+_WEAK_POSITIVES = [
     "acquista",
     "buy tickets",
     "aggiungi al carrello",
     "on sale",
     "in vendita",
+]
+
+_RESALE_KEYWORDS = [
     "rivendita",
     "resale",
 ]
@@ -312,14 +321,36 @@ def _build_headers(attempt: int) -> Dict[str, str]:
 
 
 def _detect_resale(text_lower: str) -> bool:
-    if ("rivendita" in text_lower) or ("resale" in text_lower):
+    if any(k in text_lower for k in _RESALE_KEYWORDS):
         return True
+
     # JSON inline / script tag
     if re.search(r'"isresale"\s*:\s*true', text_lower, flags=re.IGNORECASE):
         return True
     if re.search(r"\bisresale\b\s*:\s*true", text_lower, flags=re.IGNORECASE):
         return True
+
     return False
+
+
+def _detect_price_like_text(text_lower: str) -> bool:
+    """
+    Rileva un prezzo nel DOM/testo.
+
+    Serve solo come conferma forte per la rivendita:
+    una pagina con 'rivendita/resale' ma senza prezzo resta unknown.
+    """
+
+    price_patterns = [
+        r"€\s?\d+",
+        r"\d+,\d{2}\s?€",
+        r"\d+\.\d{2}\s?€",
+        r"eur\s?\d+",
+        r"\d+,\d{2}\s?eur",
+        r"\d+\.\d{2}\s?eur",
+    ]
+
+    return any(re.search(pattern, text_lower, flags=re.IGNORECASE) for pattern in price_patterns)
 
 
 def check_ticketmaster_page_availability(
@@ -384,6 +415,8 @@ def check_ticketmaster_page_availability(
 
             text_lower = (r.text or "").lower()
             is_resale = _detect_resale(text_lower)
+            has_price = _detect_price_like_text(text_lower)
+            has_weak_positive = any(k in text_lower for k in _WEAK_POSITIVES)
 
             if any(k in text_lower for k in _NEGATIVES):
                 return HtmlResult(
@@ -396,24 +429,52 @@ def check_ticketmaster_page_availability(
                     sample=text_lower[:220],
                 )
 
-            if any(k in text_lower for k in _POSITIVES):
+            # Segnale forte per rivendita:
+            # deve esserci indicazione resale/rivendita + prezzo reale.
+            if is_resale and has_price:
                 return HtmlResult(
                     ok=True,
                     availability="available",
-                    is_resale=is_resale,
+                    is_resale=True,
                     status_code=r.status_code,
                     final_url=last_final_url,
-                    reason="positive_keyword",
+                    reason="resale_price_strong_signal",
+                    sample=text_lower[:220],
+                )
+
+            # Resale/rivendita senza prezzo è un segnale insufficiente:
+            # non notifichiamo per evitare falsi positivi.
+            if is_resale:
+                return HtmlResult(
+                    ok=True,
+                    availability="unknown",
+                    is_resale=True,
+                    status_code=r.status_code,
+                    final_url=last_final_url,
+                    reason="resale_keyword_without_price",
+                    sample=text_lower[:220],
+                )
+
+            # Acquista / in vendita / on sale sono segnali troppo deboli
+            # per una notifica di rivendita.
+            if has_weak_positive:
+                return HtmlResult(
+                    ok=True,
+                    availability="unknown",
+                    is_resale=False,
+                    status_code=r.status_code,
+                    final_url=last_final_url,
+                    reason="weak_positive_ignored_for_resale",
                     sample=text_lower[:220],
                 )
 
             return HtmlResult(
                 ok=True,
                 availability="unknown",
-                is_resale=is_resale,
+                is_resale=False,
                 status_code=r.status_code,
                 final_url=last_final_url,
-                reason="no_strong_signals",
+                reason="no_strong_resale_signals",
                 sample=text_lower[:220],
             )
 
@@ -461,12 +522,17 @@ def merge_tm_signals(html: HtmlResult, prices: PriceResult) -> CombinedResult:
         prices=asdict(prices),
     )
 
-    if html.ok and html.availability in ("available", "unavailable"):
-        out.availability = html.availability
+    # Per la rivendita siamo volutamente prudenti:
+    # 1. se HTML dice unavailable, vince unavailable;
+    # 2. se HTML rileva resale + prezzo, availability=available;
+    # 3. NON promuoviamo prezzi mfxapi a "available" se HTML non conferma resale,
+    #    perché i prezzi mfxapi possono riferirsi a disponibilità standard.
+    if html.ok and html.availability == "unavailable":
+        out.availability = "unavailable"
         out.source = "html"
-    elif prices.ok and prices.availability != "unknown":
-        out.availability = prices.availability
-        out.source = "mfxapi"
+    elif html.ok and html.availability == "available" and html.is_resale:
+        out.availability = "available"
+        out.source = "html"
     elif html.ok:
         out.availability = html.availability
         out.source = "html"
