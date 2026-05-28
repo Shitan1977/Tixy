@@ -422,9 +422,8 @@ class Command(BaseCommand):
             # id_evento_piattaforma potrebbe essere in un campo diverso;
             # adattiamo al nome più probabile, con fallback a stringa vuota
             event_id_candidate = (
-                getattr(pp, "id_evento_piattaforma", None)
-                or getattr(pp, "id_performance_piattaforma", None)
-                or ""
+                    getattr(pp, "external_perf_id", None)
+                    or ""
             ).strip()
 
             def _pp_snapshot_getter(pp=pp):
