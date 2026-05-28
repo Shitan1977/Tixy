@@ -9,7 +9,7 @@ from django.core.mail import send_mail
 from django.db import transaction
 from django.utils import timezone
 from django.db.models import Q
-from api.models import Piattaforma, EventoPiattaforma, Notifica, Monitoraggio
+from api.models import Piattaforma, EventoPiattaforma, PerformancePiattaforma, Notifica, Monitoraggio
 
 # Riusa il "probe" già testato e funzionante (NO duplicazione logica)
 from api.management.commands.ticketmaster_resale import (
@@ -58,7 +58,6 @@ def _get_user_email_from_monitoraggio(mon: Any) -> Optional[str]:
     return None
 
 
-
 def _find_monitoraggi_for_evento_piattaforma(ep: EventoPiattaforma):
     """
     Monitoraggio collega EVENTO o PERFORMANCE.
@@ -76,8 +75,236 @@ def _find_monitoraggi_for_evento_piattaforma(ep: EventoPiattaforma):
     )
 
 
+def _find_monitoraggi_for_performance_piattaforma(pp: PerformancePiattaforma):
+    """
+    Cerca monitoraggi collegati a una PerformancePiattaforma, tramite:
+      - monitoraggi su performance = pp.performance
+      - monitoraggi su evento = pp.performance.evento
+    """
+    performance_id = getattr(pp, "performance_id", None)
+    if not performance_id:
+        return []
+
+    # Prova a risalire all'evento tramite la performance
+    evento_id = None
+    try:
+        evento_id = pp.performance.evento_id
+    except Exception:
+        pass
+
+    q = Q(performance_id=performance_id)
+    if evento_id:
+        q |= Q(evento_id=evento_id)
+
+    return list(
+        Monitoraggio.objects.filter(q).select_related("abbonamento")
+    )
+
+
+def _process_url(
+    *,
+    record_id: int,
+    url: str,
+    id_evento_piattaforma: str,
+    snapshot_getter,       # callable() -> dict
+    snapshot_setter,       # callable(dict) -> None  (solo update in-memory, il save avviene fuori)
+    save_snapshot,         # callable(now) -> None   (esegue il DB save)
+    find_monitoraggi,      # callable() -> list[Monitoraggio]
+    now,
+    timeout: int,
+    max_retries: int,
+    domain: str,
+    lang: str,
+    enable_prices: bool,
+    dry_run: bool,
+    verbose: bool,
+    no_email: bool,
+    stdout,
+    style,
+    sleep_s: float,
+) -> dict:
+    """
+    Logica di probe + dedupe + notifica estratta in funzione riusabile
+    per EventoPiattaforma e PerformancePiattaforma.
+
+    Restituisce un dict con i contatori da sommare al chiamante:
+      found, updated, skipped, errors, emails_sent, notif_created, notif_deduped
+    """
+    counters = dict(found=0, updated=0, skipped=0, errors=0,
+                    emails_sent=0, notif_created=0, notif_deduped=0)
+
+    try:
+        html_res = check_ticketmaster_page_availability(
+            url=url,
+            timeout=timeout,
+            session=None,
+            max_retries=max_retries,
+        )
+
+        if enable_prices and id_evento_piattaforma:
+            price_res = fetch_tm_eu_prices(
+                event_id=id_evento_piattaforma,
+                domain=domain,
+                lang=lang,
+            )
+        else:
+            price_res = PriceResult(
+                ok=False,
+                status_code=None,
+                availability="unknown",
+                min_price=None,
+                max_price=None,
+                currency=None,
+                reason="prices skipped",
+                raw=None,
+            )
+
+        combined = merge_tm_signals(html_res, price_res)
+
+        final_url = None
+        if combined.html and isinstance(combined.html, dict):
+            final_url = combined.html.get("final_url")
+
+        checksum_now = sha256(f"{combined.availability}|{combined.is_resale}|{final_url or url}")
+
+        snapshot = snapshot_getter()
+        prev_checksum = str(snapshot.get("resale_checksum") or "").strip()
+
+        # SKIP (ma aggiorna ultima_scansione)
+        if prev_checksum == checksum_now:
+            if not dry_run:
+                save_snapshot(now)
+            counters["skipped"] += 1
+            if verbose:
+                stdout.write(f"[RESALE] SKIP same_checksum id={record_id} avail={combined.availability} resale={combined.is_resale}")
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            return counters
+
+        # aggiorna snapshot
+        snapshot["resale_probe"] = {
+            "ok": combined.ok,
+            "availability": combined.availability,
+            "is_resale": combined.is_resale,
+            "min_price": combined.min_price,
+            "max_price": combined.max_price,
+            "currency": combined.currency,
+            "source": combined.source,
+            "reason": combined.reason,
+            "html": combined.html,
+            "prices": combined.prices,
+            "scanned_at": now.isoformat(),
+        }
+        snapshot["resale_checksum"] = checksum_now
+        snapshot_setter(snapshot)
+
+        is_found = bool(combined.is_resale and combined.availability == "available")
+
+        if dry_run:
+            counters["updated"] += 1
+            if is_found:
+                counters["found"] += 1
+                stdout.write(style.WARNING(f"[RESALE][DRY] FOUND id={record_id} url={url}"))
+            else:
+                if verbose:
+                    stdout.write(f"[RESALE][DRY] UPDATE id={record_id} avail={combined.availability} resale={combined.is_resale}")
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            return counters
+
+        with transaction.atomic():
+            save_snapshot(now)
+            counters["updated"] += 1
+
+            if is_found:
+                counters["found"] += 1
+                stdout.write(style.SUCCESS(f"[RESALE] FOUND id={record_id} url={url}"))
+
+                monitoraggi = find_monitoraggi()
+                if not monitoraggi:
+                    if verbose:
+                        stdout.write(style.WARNING(f"[RESALE] no monitoraggi for id={record_id}"))
+
+                for mon in monitoraggi:
+                    recipient = _get_user_email_from_monitoraggio(mon)
+                    if not recipient:
+                        if verbose:
+                            stdout.write(style.WARNING(f"[RESALE] no recipient for monitoraggio={mon.id}"))
+                        continue
+
+                    dk = f"tm_resale:{mon.id}:{checksum_now}"
+                    if Notifica.objects.filter(dedupe_key=dk, status="SENT").exists():
+                        counters["notif_deduped"] += 1
+                        if verbose:
+                            stdout.write(f"[RESALE] DEDUPE monitoraggio={mon.id}")
+                        continue
+
+                    subject = "[Tixy] Ticketmaster: Rivendita disponibile"
+                    msg_lines = [
+                        "RIVENDITA DISPONIBILE su Ticketmaster",
+                        "",
+                        f"URL: {final_url or url}",
+                        f"Disponibilità: {combined.availability}",
+                        f"Rivendita: {combined.is_resale}",
+                    ]
+                    if combined.min_price is not None or combined.max_price is not None:
+                        msg_lines.append(
+                            f"Prezzo: {combined.min_price} - {combined.max_price} {combined.currency or ''}".strip()
+                        )
+                    message = "\n".join(msg_lines)
+
+                    status = "SENT"
+                    try:
+                        if not no_email:
+                            send_mail(
+                                subject=subject,
+                                message=message,
+                                from_email=None,  # usa DEFAULT_FROM_EMAIL
+                                recipient_list=[recipient],
+                                fail_silently=False,
+                            )
+                            counters["emails_sent"] += 1
+                    except Exception as ex:
+                        status = "FAILED"
+                        if verbose:
+                            stdout.write(style.ERROR(
+                                f"[RESALE] email FAILED mon={mon.id} to={recipient} ex={ex}"
+                            ))
+
+                    Notifica.objects.create(
+                        monitoraggio=mon,
+                        channel="email",
+                        dedupe_key=dk,
+                        status=status,
+                        message=message,
+                    )
+                    counters["notif_created"] += 1
+
+            else:
+                if verbose:
+                    stdout.write(f"[RESALE] UPDATE id={record_id} avail={combined.availability} resale={combined.is_resale}")
+
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+
+    except Exception as ex:
+        counters["errors"] += 1
+        stdout.write(style.ERROR(f"[RESALE] ERROR id={record_id} url={url} ex={ex}"))
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+
+    return counters
+
+
+def _sum_counters(a: dict, b: dict) -> dict:
+    return {k: a[k] + b[k] for k in a}
+
+
 class Command(BaseCommand):
-    help = "Scan Ticketmaster resale (separato): rileva rivendite, dedupe, crea Notifica e invia email."
+    help = (
+        "Scan Ticketmaster resale: rileva rivendite su EventoPiattaforma "
+        "E PerformancePiattaforma, dedupe, crea Notifica e invia email."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument("--limit", type=int, default=200)
@@ -89,8 +316,11 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument("--verbose", action="store_true")
         parser.add_argument("--enable-prices", action="store_true")
-        # email ON di default (come richiesto), ma puoi spegnerla se serve
-        parser.add_argument("--no-email", action="store_true", help="Non inviare email (crea solo Notifica o aggiorna snapshot)")
+        parser.add_argument(
+            "--no-email",
+            action="store_true",
+            help="Non inviare email (crea solo Notifica o aggiorna snapshot)",
+        )
 
     def handle(self, *args, **opt):
         limit = int(opt["limit"])
@@ -111,191 +341,126 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR("[RESALE] Piattaforma 'ticketmaster' non trovata in DB."))
             return
 
-        qs = (
+        # ── QuerySet 1: EventoPiattaforma (logica originale) ──────────────────
+        ep_qs = (
             EventoPiattaforma.objects
             .filter(piattaforma=plat)
             .exclude(url__isnull=True).exclude(url="")
             .order_by("-id")[:limit]
         )
 
+        # ── QuerySet 2: PerformancePiattaforma (NUOVO) ────────────────────────
+        pp_qs = (
+            PerformancePiattaforma.objects
+            .filter(piattaforma=plat)
+            .exclude(url__isnull=True).exclude(url="")
+            .order_by("-id")[:limit]
+        )
+
         self.stdout.write(self.style.SUCCESS(
-            f"[RESALE] START now={now.isoformat()} count={qs.count()} dry_run={dry_run} enable_prices={enable_prices} email={'OFF' if no_email else 'ON'}"
+            f"[RESALE] START now={now.isoformat()} "
+            f"ep_count={ep_qs.count()} pp_count={pp_qs.count()} "
+            f"dry_run={dry_run} enable_prices={enable_prices} "
+            f"email={'OFF' if no_email else 'ON'}"
         ))
 
-        found = 0
-        updated = 0
-        skipped = 0
-        errors = 0
-        emails_sent = 0
-        notif_created = 0
-        notif_deduped = 0
+        totals = dict(found=0, updated=0, skipped=0, errors=0,
+                      emails_sent=0, notif_created=0, notif_deduped=0)
 
-        for ep in qs:
+        shared_kwargs = dict(
+            now=now,
+            timeout=timeout,
+            max_retries=max_retries,
+            domain=domain,
+            lang=lang,
+            enable_prices=enable_prices,
+            dry_run=dry_run,
+            verbose=verbose,
+            no_email=no_email,
+            stdout=self.stdout,
+            style=self.style,
+            sleep_s=sleep_s,
+        )
+
+        # ── Loop 1: EventoPiattaforma ─────────────────────────────────────────
+        self.stdout.write("[RESALE] --- EventoPiattaforma ---")
+        for ep in ep_qs:
             url = ep.url
             event_id_candidate = (ep.id_evento_piattaforma or "").strip()
 
-            try:
-                html_res = check_ticketmaster_page_availability(
-                    url=url,
-                    timeout=timeout,
-                    session=None,
-                    max_retries=max_retries,
+            def _ep_snapshot_getter(ep=ep):
+                return _safe_dict(ep.snapshot_raw)
+
+            def _ep_snapshot_setter(snap, ep=ep):
+                ep.snapshot_raw = snap
+
+            def _ep_save_snapshot(ts, ep=ep):
+                EventoPiattaforma.objects.filter(id=ep.id).update(
+                    snapshot_raw=ep.snapshot_raw,
+                    ultima_scansione=ts,
                 )
 
-                if enable_prices and event_id_candidate:
-                    price_res = fetch_tm_eu_prices(
-                        event_id=event_id_candidate,
-                        domain=domain,
-                        lang=lang,
-                    )
-                else:
-                    price_res = PriceResult(
-                        ok=False,
-                        status_code=None,
-                        availability="unknown",
-                        min_price=None,
-                        max_price=None,
-                        currency=None,
-                        reason="prices skipped",
-                        raw=None,
-                    )
+            def _ep_find_monitoraggi(ep=ep):
+                return _find_monitoraggi_for_evento_piattaforma(ep)
 
-                combined = merge_tm_signals(html_res, price_res)
+            c = _process_url(
+                record_id=ep.id,
+                url=url,
+                id_evento_piattaforma=event_id_candidate,
+                snapshot_getter=_ep_snapshot_getter,
+                snapshot_setter=_ep_snapshot_setter,
+                save_snapshot=_ep_save_snapshot,
+                find_monitoraggi=_ep_find_monitoraggi,
+                **shared_kwargs,
+            )
+            totals = _sum_counters(totals, c)
 
-                final_url = None
-                if combined.html and isinstance(combined.html, dict):
-                    final_url = combined.html.get("final_url")
+        # ── Loop 2: PerformancePiattaforma (NUOVO) ────────────────────────────
+        self.stdout.write("[RESALE] --- PerformancePiattaforma ---")
+        for pp in pp_qs:
+            url = pp.url
+            # id_evento_piattaforma potrebbe essere in un campo diverso;
+            # adattiamo al nome più probabile, con fallback a stringa vuota
+            event_id_candidate = (
+                getattr(pp, "id_evento_piattaforma", None)
+                or getattr(pp, "id_performance_piattaforma", None)
+                or ""
+            ).strip()
 
-                checksum_now = sha256(f"{combined.availability}|{combined.is_resale}|{final_url or url}")
+            def _pp_snapshot_getter(pp=pp):
+                return _safe_dict(pp.snapshot_raw)
 
-                snapshot = _safe_dict(ep.snapshot_raw)
-                prev_checksum = str(snapshot.get("resale_checksum") or "").strip()
+            def _pp_snapshot_setter(snap, pp=pp):
+                pp.snapshot_raw = snap
 
-                # SKIP (ma aggiorna ultima_scansione)
-                if prev_checksum == checksum_now:
-                    if not dry_run:
-                        EventoPiattaforma.objects.filter(id=ep.id).update(ultima_scansione=now)
-                    skipped += 1
-                    if verbose:
-                        self.stdout.write(f"[RESALE] SKIP same_checksum id={ep.id} avail={combined.availability} resale={combined.is_resale}")
-                    if sleep_s > 0:
-                        time.sleep(sleep_s)
-                    continue
+            def _pp_save_snapshot(ts, pp=pp):
+                PerformancePiattaforma.objects.filter(id=pp.id).update(
+                    snapshot_raw=pp.snapshot_raw,
+                    ultima_scansione=ts,
+                )
 
-                # aggiorna snapshot
-                snapshot["resale_probe"] = {
-                    "ok": combined.ok,
-                    "availability": combined.availability,
-                    "is_resale": combined.is_resale,
-                    "min_price": combined.min_price,
-                    "max_price": combined.max_price,
-                    "currency": combined.currency,
-                    "source": combined.source,
-                    "reason": combined.reason,
-                    "html": combined.html,
-                    "prices": combined.prices,
-                    "scanned_at": now.isoformat(),
-                }
-                snapshot["resale_checksum"] = checksum_now
+            def _pp_find_monitoraggi(pp=pp):
+                return _find_monitoraggi_for_performance_piattaforma(pp)
 
-                is_found = bool(combined.is_resale and combined.availability == "available")
-
-                if dry_run:
-                    updated += 1
-                    if is_found:
-                        found += 1
-                        self.stdout.write(self.style.WARNING(f"[RESALE][DRY] FOUND id={ep.id} url={url}"))
-                    else:
-                        if verbose:
-                            self.stdout.write(f"[RESALE][DRY] UPDATE id={ep.id} avail={combined.availability} resale={combined.is_resale}")
-                    if sleep_s > 0:
-                        time.sleep(sleep_s)
-                    continue
-
-                with transaction.atomic():
-                    ep.snapshot_raw = snapshot
-                    ep.ultima_scansione = now
-                    ep.save(update_fields=["snapshot_raw", "ultima_scansione", "aggiornato_il"])
-                    updated += 1
-
-                    if is_found:
-                        found += 1
-                        self.stdout.write(self.style.SUCCESS(f"[RESALE] FOUND id={ep.id} url={url}"))
-
-                        # 1) Trova monitoraggi interessati
-                        monitoraggi = _find_monitoraggi_for_evento_piattaforma(ep)
-                        if not monitoraggi:
-                            if verbose:
-                                self.stdout.write(self.style.WARNING(f"[RESALE] no monitoraggi for ep_id={ep.id}"))
-                        for mon in monitoraggi:
-                            recipient = _get_user_email_from_monitoraggio(mon)
-                            if not recipient:
-                                if verbose:
-                                    self.stdout.write(self.style.WARNING(f"[RESALE] no recipient for monitoraggio={mon.id}"))
-                                continue
-
-                            # 2) dedupe per notifica inviata
-                            dk = f"tm_resale:{mon.id}:{checksum_now}"
-                            if Notifica.objects.filter(dedupe_key=dk, status="SENT").exists():
-                                notif_deduped += 1
-                                if verbose:
-                                    self.stdout.write(f"[RESALE] DEDUPE monitoraggio={mon.id}")
-                                continue
-
-                            subject = "[Tixy] Ticketmaster: Rivendita disponibile"
-                            msg_lines = [
-                                "RIVENDITA DISPONIBILE su Ticketmaster",
-                                "",
-                                f"URL: {final_url or url}",
-                                f"Disponibilità: {combined.availability}",
-                                f"Rivendita: {combined.is_resale}",
-                            ]
-                            if combined.min_price is not None or combined.max_price is not None:
-                                msg_lines.append(f"Prezzo: {combined.min_price} - {combined.max_price} {combined.currency or ''}".strip())
-                            message = "\n".join(msg_lines)
-
-                            # 3) invio email (stesso backend/settings del progetto)
-                            status = "SENT"
-                            try:
-                                if not no_email:
-                                    send_mail(
-                                        subject=subject,
-                                        message=message,
-                                        from_email=None,  # usa DEFAULT_FROM_EMAIL
-                                        recipient_list=[recipient],
-                                        fail_silently=False,
-                                    )
-                                    emails_sent += 1
-                            except Exception as ex:
-                                status = "FAILED"
-                                if verbose:
-                                    self.stdout.write(self.style.ERROR(f"[RESALE] email FAILED mon={mon.id} to={recipient} ex={ex}"))
-
-                            # 4) salva Notifica SEMPRE (SENT/FAILED)
-                            Notifica.objects.create(
-                                monitoraggio=mon,
-                                channel="email",
-                                dedupe_key=dk,
-                                status=status,
-                                message=message,
-                            )
-                            notif_created += 1
-
-                    else:
-                        if verbose:
-                            self.stdout.write(f"[RESALE] UPDATE id={ep.id} avail={combined.availability} resale={combined.is_resale}")
-
-                if sleep_s > 0:
-                    time.sleep(sleep_s)
-
-            except Exception as ex:
-                errors += 1
-                self.stdout.write(self.style.ERROR(f"[RESALE] ERROR id={getattr(ep,'id',None)} url={url} ex={ex}"))
-                if sleep_s > 0:
-                    time.sleep(sleep_s)
-                continue
+            c = _process_url(
+                record_id=pp.id,
+                url=url,
+                id_evento_piattaforma=event_id_candidate,
+                snapshot_getter=_pp_snapshot_getter,
+                snapshot_setter=_pp_snapshot_setter,
+                save_snapshot=_pp_save_snapshot,
+                find_monitoraggi=_pp_find_monitoraggi,
+                **shared_kwargs,
+            )
+            totals = _sum_counters(totals, c)
 
         self.stdout.write(self.style.SUCCESS(
-            f"[RESALE] END found={found} updated={updated} skipped={skipped} errors={errors} "
-            f"emails_sent={emails_sent} notifica_created={notif_created} notifica_deduped={notif_deduped}"
+            f"[RESALE] END "
+            f"found={totals['found']} "
+            f"updated={totals['updated']} "
+            f"skipped={totals['skipped']} "
+            f"errors={totals['errors']} "
+            f"emails_sent={totals['emails_sent']} "
+            f"notifica_created={totals['notif_created']} "
+            f"notifica_deduped={totals['notif_deduped']}"
         ))
