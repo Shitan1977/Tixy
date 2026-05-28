@@ -251,42 +251,71 @@ def _fetch_discovery_prices(
     params = {"apikey": apikey}
     headers = {"Accept": "application/json"}
 
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=timeout)
-    except Exception as ex:
-        return PriceResult(
-            ok=False, status_code=None, availability="unknown",
-            min_price=None, max_price=None, currency=None,
-            reason=f"Discovery API exception: {ex}", raw=None,
-        )
+    MAX_DISC_RETRIES = 2  # solo per 429 — non esageriamo
 
-    body = (r.text or "")[:600]
+    last_status: Optional[int] = None
 
-    if r.status_code == 404:
-        return PriceResult(
-            ok=False, status_code=404, availability="unknown",
-            min_price=None, max_price=None, currency=None,
-            reason="Discovery API: event_id non trovato",
-            raw=None,
-        )
+    for attempt in range(MAX_DISC_RETRIES + 1):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        except Exception as ex:
+            return PriceResult(
+                ok=False, status_code=None, availability="unknown",
+                min_price=None, max_price=None, currency=None,
+                reason=f"Discovery API exception: {ex}", raw=None,
+            )
 
-    if r.status_code in (401, 403):
-        request_id = r.headers.get("X-Request-Id") or r.headers.get("X-TM-Request-Id")
-        rid = f" request_id={request_id}" if request_id else ""
-        return PriceResult(
-            ok=False, status_code=r.status_code, availability="unknown",
-            min_price=None, max_price=None, currency=None,
-            reason=f"Discovery API: non autorizzato ({r.status_code}){rid}. body={body[:200]!r}",
-            raw=None,
-        )
+        last_status = r.status_code
+        body = (r.text or "")[:600]
 
-    if r.status_code >= 400:
-        return PriceResult(
-            ok=False, status_code=r.status_code, availability="unknown",
-            min_price=None, max_price=None, currency=None,
-            reason=f"Discovery API errore HTTP {r.status_code}: {body}",
-            raw=None,
-        )
+        # 429: rispetta Retry-After se presente, poi riprova (max 2 volte)
+        if r.status_code == 429:
+            if attempt < MAX_DISC_RETRIES:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    sleep_s = float(retry_after) if retry_after else (2 ** (attempt + 1))
+                except Exception:
+                    sleep_s = 2 ** (attempt + 1)
+                # Cap a 30s per non bloccare il run troppo a lungo
+                sleep_s = min(sleep_s, 30.0)
+                time.sleep(sleep_s)
+                continue
+            # Tentativi esauriti — restituisce 429 così _fetch_prices_with_state
+            # può impostare halted=True
+            return PriceResult(
+                ok=False, status_code=429, availability="unknown",
+                min_price=None, max_price=None, currency=None,
+                reason=f"Discovery API: rate limit (429) dopo {MAX_DISC_RETRIES + 1} tentativi",
+                raw=None,
+            )
+
+        if r.status_code == 404:
+            return PriceResult(
+                ok=False, status_code=404, availability="unknown",
+                min_price=None, max_price=None, currency=None,
+                reason="Discovery API: event_id non trovato",
+                raw=None,
+            )
+
+        if r.status_code in (401, 403):
+            request_id = r.headers.get("X-Request-Id") or r.headers.get("X-TM-Request-Id")
+            rid = f" request_id={request_id}" if request_id else ""
+            return PriceResult(
+                ok=False, status_code=r.status_code, availability="unknown",
+                min_price=None, max_price=None, currency=None,
+                reason=f"Discovery API: non autorizzato ({r.status_code}){rid}. body={body[:200]!r}",
+                raw=None,
+            )
+
+        if r.status_code >= 400:
+            return PriceResult(
+                ok=False, status_code=r.status_code, availability="unknown",
+                min_price=None, max_price=None, currency=None,
+                reason=f"Discovery API errore HTTP {r.status_code}: {body}",
+                raw=None,
+            )
+
+        break  # 2xx — usciamo dal loop
 
     try:
         data = r.json()

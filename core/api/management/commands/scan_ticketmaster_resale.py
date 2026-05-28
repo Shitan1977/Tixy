@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, Set
 
 from django.core.management.base import BaseCommand
 from django.core.mail import send_mail
@@ -11,7 +12,6 @@ from django.utils import timezone
 from django.db.models import Q
 from api.models import Piattaforma, EventoPiattaforma, PerformancePiattaforma, Notifica, Monitoraggio
 
-# Riusa il "probe" già testato e funzionante (NO duplicazione logica)
 from api.management.commands.ticketmaster_resale import (
     check_ticketmaster_page_availability,
     fetch_tm_eu_prices,
@@ -29,14 +29,6 @@ def _safe_dict(obj: Any) -> Dict[str, Any]:
 
 
 def _get_user_email_from_monitoraggio(mon: Any) -> Optional[str]:
-    """
-    Estrae email utente in modo robusto, senza conoscere esattamente la struttura.
-    Prova i path più comuni:
-      mon.abbonamento.utente.email
-      mon.abbonamento.user.email
-      mon.utente.email
-      mon.user.email
-    """
     for path in (
         ("abbonamento", "utente", "email"),
         ("abbonamento", "user", "email"),
@@ -59,15 +51,8 @@ def _get_user_email_from_monitoraggio(mon: Any) -> Optional[str]:
 
 
 def _find_monitoraggi_for_evento_piattaforma(ep: EventoPiattaforma):
-    """
-    Monitoraggio collega EVENTO o PERFORMANCE.
-    Per Ticketmaster, EventoPiattaforma collega l'Evento, quindi:
-      - monitoraggi su evento = ep.evento
-      - monitoraggi su performance il cui evento = ep.evento
-    """
     if not getattr(ep, "evento_id", None):
         return []
-
     return list(
         Monitoraggio.objects.filter(
             Q(evento_id=ep.evento_id) | Q(performance__evento_id=ep.evento_id)
@@ -76,29 +61,116 @@ def _find_monitoraggi_for_evento_piattaforma(ep: EventoPiattaforma):
 
 
 def _find_monitoraggi_for_performance_piattaforma(pp: PerformancePiattaforma):
-    """
-    Cerca monitoraggi collegati a una PerformancePiattaforma, tramite:
-      - monitoraggi su performance = pp.performance
-      - monitoraggi su evento = pp.performance.evento
-    """
     performance_id = getattr(pp, "performance_id", None)
     if not performance_id:
         return []
-
-    # Prova a risalire all'evento tramite la performance
     evento_id = None
     try:
         evento_id = pp.performance.evento_id
     except Exception:
         pass
-
     q = Q(performance_id=performance_id)
     if evento_id:
         q |= Q(evento_id=evento_id)
-
     return list(
         Monitoraggio.objects.filter(q).select_related("abbonamento")
     )
+
+
+def _get_pp_event_id(pp: PerformancePiattaforma) -> str:
+    """
+    Ricava l'event_id Ticketmaster da PerformancePiattaforma con questa priorità:
+      1. pp.snapshot_raw["id"]     → già pulito
+      2. pp.external_perf_id       → taglia "-perf-..." se presente
+    """
+    snap = _safe_dict(getattr(pp, "snapshot_raw", None))
+    snap_id = str(snap.get("id") or "").strip()
+    if snap_id:
+        return snap_id
+
+    ext = str(getattr(pp, "external_perf_id", "") or "").strip()
+    if ext:
+        cleaned = re.split(r"-perf-", ext, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if cleaned:
+            return cleaned
+
+    return ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Stato condiviso del run per il rate-limit sui prezzi
+# ──────────────────────────────────────────────────────────────────────────────
+
+class _PriceRunState:
+    """
+    Tiene traccia, per la durata di un singolo run del management command, di:
+      - price_cache:  event_id → PriceResult già ottenuto (evita chiamate doppie)
+      - prices_halted: True se è arrivato un 429, da quel punto in poi
+                       nessun'altra chiamata prezzi viene tentata nel run
+    """
+    def __init__(self) -> None:
+        self.price_cache: Dict[str, PriceResult] = {}
+        self.prices_halted: bool = False
+
+    def is_halted(self) -> bool:
+        return self.prices_halted
+
+    def halt(self) -> None:
+        self.prices_halted = True
+
+    def get(self, event_id: str) -> Optional[PriceResult]:
+        return self.price_cache.get(event_id)
+
+    def put(self, event_id: str, result: PriceResult) -> None:
+        self.price_cache[event_id] = result
+
+
+def _fetch_prices_with_state(
+    *,
+    event_id: str,
+    domain: str,
+    lang: str,
+    state: _PriceRunState,
+    verbose: bool,
+    stdout,
+    style,
+) -> PriceResult:
+    """
+    Wrapper attorno a fetch_tm_eu_prices che:
+      1. Se prices_halted=True  → restituisce subito PriceResult skipped (nessuna chiamata)
+      2. Se event_id in cache   → restituisce risultato cached (nessuna chiamata)
+      3. Chiama fetch_tm_eu_prices, salva in cache
+      4. Se il risultato è 429  → imposta halted=True per il resto del run
+    """
+    _SKIPPED = PriceResult(
+        ok=False, status_code=None, availability="unknown",
+        min_price=None, max_price=None, currency=None,
+        reason="prices halted: 429 received earlier in this run", raw=None,
+    )
+
+    if state.is_halted():
+        return _SKIPPED
+
+    cached = state.get(event_id)
+    if cached is not None:
+        if verbose:
+            stdout.write(f"[RESALE] prices cache hit event_id={event_id!r}")
+        return cached
+
+    result = fetch_tm_eu_prices(event_id=event_id, domain=domain, lang=lang)
+    state.put(event_id, result)
+
+    # 429 su qualsiasi endpoint (mfxapi o Discovery) → halt per il run
+    if result.status_code == 429 or (
+        not result.ok and result.reason and "429" in str(result.reason)
+    ):
+        state.halt()
+        stdout.write(style.WARNING(
+            f"[RESALE] prices 429 on event_id={event_id!r} — "
+            f"halting all price calls for this run. reason={result.reason!r}"
+        ))
+
+    return result
 
 
 def _process_url(
@@ -106,16 +178,17 @@ def _process_url(
     record_id: int,
     url: str,
     id_evento_piattaforma: str,
-    snapshot_getter,       # callable() -> dict
-    snapshot_setter,       # callable(dict) -> None  (solo update in-memory, il save avviene fuori)
-    save_snapshot,         # callable(now) -> None   (esegue il DB save)
-    find_monitoraggi,      # callable() -> list[Monitoraggio]
+    snapshot_getter,
+    snapshot_setter,
+    save_snapshot,
+    find_monitoraggi,
     now,
     timeout: int,
     max_retries: int,
     domain: str,
     lang: str,
     enable_prices: bool,
+    price_state: _PriceRunState,
     dry_run: bool,
     verbose: bool,
     no_email: bool,
@@ -123,13 +196,6 @@ def _process_url(
     style,
     sleep_s: float,
 ) -> dict:
-    """
-    Logica di probe + dedupe + notifica estratta in funzione riusabile
-    per EventoPiattaforma e PerformancePiattaforma.
-
-    Restituisce un dict con i contatori da sommare al chiamante:
-      found, updated, skipped, errors, emails_sent, notif_created, notif_deduped
-    """
     counters = dict(found=0, updated=0, skipped=0, errors=0,
                     emails_sent=0, notif_created=0, notif_deduped=0)
 
@@ -141,22 +207,37 @@ def _process_url(
             max_retries=max_retries,
         )
 
-        if enable_prices and id_evento_piattaforma:
-            price_res = fetch_tm_eu_prices(
+        # Chiama i prezzi SOLO se:
+        #   - --enable-prices attivo
+        #   - event_id disponibile
+        #   - HTML ha rilevato is_resale (evita chiamate su pagine senza interesse)
+        #   - run non è in stato halted per 429
+        if (
+            enable_prices
+            and id_evento_piattaforma
+            and html_res.is_resale
+            and not price_state.is_halted()
+        ):
+            price_res = _fetch_prices_with_state(
                 event_id=id_evento_piattaforma,
                 domain=domain,
                 lang=lang,
+                state=price_state,
+                verbose=verbose,
+                stdout=stdout,
+                style=style,
             )
         else:
+            if enable_prices and id_evento_piattaforma and not html_res.is_resale:
+                reason = "prices skipped: html no resale signal"
+            elif price_state.is_halted():
+                reason = "prices halted: 429 received earlier in this run"
+            else:
+                reason = "prices skipped"
             price_res = PriceResult(
-                ok=False,
-                status_code=None,
-                availability="unknown",
-                min_price=None,
-                max_price=None,
-                currency=None,
-                reason="prices skipped",
-                raw=None,
+                ok=False, status_code=None, availability="unknown",
+                min_price=None, max_price=None, currency=None,
+                reason=reason, raw=None,
             )
 
         combined = merge_tm_signals(html_res, price_res)
@@ -170,18 +251,19 @@ def _process_url(
         snapshot = snapshot_getter()
         prev_checksum = str(snapshot.get("resale_checksum") or "").strip()
 
-        # SKIP (ma aggiorna ultima_scansione)
         if prev_checksum == checksum_now:
             if not dry_run:
                 save_snapshot(now)
             counters["skipped"] += 1
             if verbose:
-                stdout.write(f"[RESALE] SKIP same_checksum id={record_id} avail={combined.availability} resale={combined.is_resale}")
+                stdout.write(
+                    f"[RESALE] SKIP same_checksum id={record_id} "
+                    f"avail={combined.availability} resale={combined.is_resale}"
+                )
             if sleep_s > 0:
                 time.sleep(sleep_s)
             return counters
 
-        # aggiorna snapshot
         snapshot["resale_probe"] = {
             "ok": combined.ok,
             "availability": combined.availability,
@@ -207,7 +289,10 @@ def _process_url(
                 stdout.write(style.WARNING(f"[RESALE][DRY] FOUND id={record_id} url={url}"))
             else:
                 if verbose:
-                    stdout.write(f"[RESALE][DRY] UPDATE id={record_id} avail={combined.availability} resale={combined.is_resale}")
+                    stdout.write(
+                        f"[RESALE][DRY] UPDATE id={record_id} "
+                        f"avail={combined.availability} resale={combined.is_resale}"
+                    )
             if sleep_s > 0:
                 time.sleep(sleep_s)
             return counters
@@ -229,7 +314,9 @@ def _process_url(
                     recipient = _get_user_email_from_monitoraggio(mon)
                     if not recipient:
                         if verbose:
-                            stdout.write(style.WARNING(f"[RESALE] no recipient for monitoraggio={mon.id}"))
+                            stdout.write(style.WARNING(
+                                f"[RESALE] no recipient for monitoraggio={mon.id}"
+                            ))
                         continue
 
                     dk = f"tm_resale:{mon.id}:{checksum_now}"
@@ -249,7 +336,8 @@ def _process_url(
                     ]
                     if combined.min_price is not None or combined.max_price is not None:
                         msg_lines.append(
-                            f"Prezzo: {combined.min_price} - {combined.max_price} {combined.currency or ''}".strip()
+                            f"Prezzo: {combined.min_price} - {combined.max_price} "
+                            f"{combined.currency or ''}".strip()
                         )
                     message = "\n".join(msg_lines)
 
@@ -259,7 +347,7 @@ def _process_url(
                             send_mail(
                                 subject=subject,
                                 message=message,
-                                from_email=None,  # usa DEFAULT_FROM_EMAIL
+                                from_email=None,
                                 recipient_list=[recipient],
                                 fail_silently=False,
                             )
@@ -282,7 +370,10 @@ def _process_url(
 
             else:
                 if verbose:
-                    stdout.write(f"[RESALE] UPDATE id={record_id} avail={combined.availability} resale={combined.is_resale}")
+                    stdout.write(
+                        f"[RESALE] UPDATE id={record_id} "
+                        f"avail={combined.availability} resale={combined.is_resale}"
+                    )
 
         if sleep_s > 0:
             time.sleep(sleep_s)
@@ -298,34 +389,6 @@ def _process_url(
 
 def _sum_counters(a: dict, b: dict) -> dict:
     return {k: a[k] + b[k] for k in a}
-
-
-def _get_pp_event_id(pp: PerformancePiattaforma) -> str:
-    """
-    Ricava l'event_id Ticketmaster da PerformancePiattaforma con questa priorità:
-
-    1. pp.snapshot_raw["id"]          → es. "Z59rmIYnyZ7a1"  (già pulito)
-    2. pp.external_perf_id            → es. "Z59rmIYnyZ7A1-perf-285"
-       → taglia tutto da "-perf-" in poi
-
-    Restituisce stringa vuota se non trovato.
-    """
-    # 1. snapshot_raw["id"]
-    snap = _safe_dict(getattr(pp, "snapshot_raw", None))
-    snap_id = str(snap.get("id") or "").strip()
-    if snap_id:
-        return snap_id
-
-    # 2. external_perf_id con strip di "-perf-..."
-    ext = str(getattr(pp, "external_perf_id", "") or "").strip()
-    if ext:
-        # taglia "-perf-<qualsiasi cosa>" (case-insensitive)
-        import re
-        cleaned = re.split(r"-perf-", ext, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-        if cleaned:
-            return cleaned
-
-    return ""
 
 
 class Command(BaseCommand):
@@ -349,47 +412,67 @@ class Command(BaseCommand):
             action="store_true",
             help="Non inviare email (crea solo Notifica o aggiorna snapshot)",
         )
+        # ── Filtri per test su singolo record ────────────────────────────────
+        parser.add_argument(
+            "--performance-piattaforma-id",
+            type=int,
+            default=None,
+            help="Processa solo PerformancePiattaforma con questo id (utile per test)",
+        )
+        parser.add_argument(
+            "--evento-piattaforma-id",
+            type=int,
+            default=None,
+            help="Processa solo EventoPiattaforma con questo id (utile per test)",
+        )
 
     def handle(self, *args, **opt):
-        limit = int(opt["limit"])
-        sleep_s = float(opt["sleep"])
-        timeout = int(opt["timeout"])
-        max_retries = int(opt["max_retries"])
-        domain = str(opt["domain"])
-        lang = str(opt["lang"])
-        dry_run = bool(opt["dry_run"])
-        verbose = bool(opt["verbose"])
-        enable_prices = bool(opt["enable_prices"])
-        no_email = bool(opt["no_email"])
+        limit           = int(opt["limit"])
+        sleep_s         = float(opt["sleep"])
+        timeout         = int(opt["timeout"])
+        max_retries     = int(opt["max_retries"])
+        domain          = str(opt["domain"])
+        lang            = str(opt["lang"])
+        dry_run         = bool(opt["dry_run"])
+        verbose         = bool(opt["verbose"])
+        enable_prices   = bool(opt["enable_prices"])
+        no_email        = bool(opt["no_email"])
+        filter_pp_id    = opt.get("performance_piattaforma_id")
+        filter_ep_id    = opt.get("evento_piattaforma_id")
 
         now = timezone.now()
 
+        # Stato condiviso per il rate-limit sui prezzi (cache + halt flag)
+        price_state = _PriceRunState()
+
         plat = Piattaforma.objects.filter(nome__iexact="ticketmaster").first()
         if not plat:
-            self.stdout.write(self.style.ERROR("[RESALE] Piattaforma 'ticketmaster' non trovata in DB."))
+            self.stdout.write(self.style.ERROR(
+                "[RESALE] Piattaforma 'ticketmaster' non trovata in DB."
+            ))
             return
 
-        # ── QuerySet 1: EventoPiattaforma (logica originale) ──────────────────
-        ep_qs = (
-            EventoPiattaforma.objects
-            .filter(piattaforma=plat)
-            .exclude(url__isnull=True).exclude(url="")
-            .order_by("-id")[:limit]
-        )
+        # ── QuerySet 1: EventoPiattaforma ─────────────────────────────────────
+        ep_qs = EventoPiattaforma.objects.filter(piattaforma=plat).exclude(url__isnull=True).exclude(url="")
+        if filter_ep_id is not None:
+            ep_qs = ep_qs.filter(id=filter_ep_id)
+        else:
+            ep_qs = ep_qs.order_by("-id")[:limit]
 
-        # ── QuerySet 2: PerformancePiattaforma (NUOVO) ────────────────────────
-        pp_qs = (
-            PerformancePiattaforma.objects
-            .filter(piattaforma=plat)
-            .exclude(url__isnull=True).exclude(url="")
-            .order_by("-id")[:limit]
-        )
+        # ── QuerySet 2: PerformancePiattaforma ────────────────────────────────
+        pp_qs = PerformancePiattaforma.objects.filter(piattaforma=plat).exclude(url__isnull=True).exclude(url="")
+        if filter_pp_id is not None:
+            pp_qs = pp_qs.filter(id=filter_pp_id)
+        else:
+            pp_qs = pp_qs.order_by("-id")[:limit]
 
         self.stdout.write(self.style.SUCCESS(
             f"[RESALE] START now={now.isoformat()} "
             f"ep_count={ep_qs.count()} pp_count={pp_qs.count()} "
             f"dry_run={dry_run} enable_prices={enable_prices} "
             f"email={'OFF' if no_email else 'ON'}"
+            + (f" filter_ep_id={filter_ep_id}" if filter_ep_id else "")
+            + (f" filter_pp_id={filter_pp_id}" if filter_pp_id else "")
         ))
 
         totals = dict(found=0, updated=0, skipped=0, errors=0,
@@ -402,6 +485,7 @@ class Command(BaseCommand):
             domain=domain,
             lang=lang,
             enable_prices=enable_prices,
+            price_state=price_state,
             dry_run=dry_run,
             verbose=verbose,
             no_email=no_email,
@@ -447,10 +531,6 @@ class Command(BaseCommand):
         self.stdout.write("[RESALE] --- PerformancePiattaforma ---")
         for pp in pp_qs:
             url = pp.url
-
-            # Ricava event_id Ticketmaster:
-            #   1) snapshot_raw["id"]        (già pulito, priorità massima)
-            #   2) external_perf_id          (taglia "-perf-..." se presente)
             event_id_candidate = _get_pp_event_id(pp)
             if verbose:
                 self.stdout.write(
