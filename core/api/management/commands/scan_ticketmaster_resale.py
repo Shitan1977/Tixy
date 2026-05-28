@@ -300,6 +300,34 @@ def _sum_counters(a: dict, b: dict) -> dict:
     return {k: a[k] + b[k] for k in a}
 
 
+def _get_pp_event_id(pp: PerformancePiattaforma) -> str:
+    """
+    Ricava l'event_id Ticketmaster da PerformancePiattaforma con questa priorità:
+
+    1. pp.snapshot_raw["id"]          → es. "Z59rmIYnyZ7a1"  (già pulito)
+    2. pp.external_perf_id            → es. "Z59rmIYnyZ7A1-perf-285"
+       → taglia tutto da "-perf-" in poi
+
+    Restituisce stringa vuota se non trovato.
+    """
+    # 1. snapshot_raw["id"]
+    snap = _safe_dict(getattr(pp, "snapshot_raw", None))
+    snap_id = str(snap.get("id") or "").strip()
+    if snap_id:
+        return snap_id
+
+    # 2. external_perf_id con strip di "-perf-..."
+    ext = str(getattr(pp, "external_perf_id", "") or "").strip()
+    if ext:
+        # taglia "-perf-<qualsiasi cosa>" (case-insensitive)
+        import re
+        cleaned = re.split(r"-perf-", ext, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if cleaned:
+            return cleaned
+
+    return ""
+
+
 class Command(BaseCommand):
     help = (
         "Scan Ticketmaster resale: rileva rivendite su EventoPiattaforma "
@@ -415,16 +443,19 @@ class Command(BaseCommand):
             )
             totals = _sum_counters(totals, c)
 
-        # ── Loop 2: PerformancePiattaforma (NUOVO) ────────────────────────────
+        # ── Loop 2: PerformancePiattaforma ────────────────────────────────────
         self.stdout.write("[RESALE] --- PerformancePiattaforma ---")
         for pp in pp_qs:
             url = pp.url
-            # id_evento_piattaforma potrebbe essere in un campo diverso;
-            # adattiamo al nome più probabile, con fallback a stringa vuota
-            event_id_candidate = (
-                    getattr(pp, "external_perf_id", None)
-                    or ""
-            ).strip()
+
+            # Ricava event_id Ticketmaster:
+            #   1) snapshot_raw["id"]        (già pulito, priorità massima)
+            #   2) external_perf_id          (taglia "-perf-..." se presente)
+            event_id_candidate = _get_pp_event_id(pp)
+            if verbose:
+                self.stdout.write(
+                    f"[RESALE] PP id={pp.id} event_id_candidate={event_id_candidate!r}"
+                )
 
             def _pp_snapshot_getter(pp=pp):
                 return _safe_dict(pp.snapshot_raw)
