@@ -905,10 +905,11 @@ class TicketUploadURLSerializer(serializers.Serializer):
         return self.create(self.validated_data)
 class TicketSubitemMiniSerializer(serializers.ModelSerializer):
     code_value = serializers.SerializerMethodField()
+    sigillo_fiscale = serializers.SerializerMethodField()
 
     class Meta:
         model = TicketSubitem
-        fields = ("id", "full_name", "price", "page", "code_type", "code_value", "is_listed", "is_sold")
+        fields = ("id", "full_name", "price", "page", "code_type", "code_value", "is_listed", "is_sold", "sigillo_fiscale")
 
     def get_code_value(self, obj):
         raw = (obj.code_raw or "").strip()
@@ -917,6 +918,10 @@ class TicketSubitemMiniSerializer(serializers.ModelSerializer):
         if len(raw) <= 6:
             return raw
         return ("*" * max(0, len(raw) - 6)) + raw[-6:]
+
+    def get_sigillo_fiscale(self, obj):
+        biglietto = getattr(obj, "biglietto", None)
+        return getattr(biglietto, "sigillo_fiscale", None) if biglietto else None
 
 # --- 2A) Subitem (pezzo singolo vendibile) ---
 class TicketSubitemSerializer(serializers.ModelSerializer):
@@ -1268,6 +1273,7 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
     change_name_required = serializers.SerializerMethodField()
     selected_subitem_ids = serializers.SerializerMethodField()
     editable_subitems = serializers.SerializerMethodField()
+    sale_details = serializers.SerializerMethodField()
 
     class Meta:
         model = Listing
@@ -1277,6 +1283,7 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
             "download_url", "sold_qty", "is_fully_sold",
             "change_name_required",     # <-- AGGIUNTO
             "selected_subitem_ids", "editable_subitems",
+            "sale_details",
             "notes", "created_at",
         )
 
@@ -1353,6 +1360,49 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
             .order_by("id")
         )
         return TicketSubitemMiniSerializer(qs, many=True, context=self.context).data
+
+    def get_sale_details(self, obj):
+        order = (
+            obj.orders.select_related("buyer")
+            .order_by("-delivered_at", "-paid_at", "-created_at", "-id")
+            .first()
+        )
+        if not order:
+            return {}
+
+        def _fmt_dt(value):
+            if not value:
+                return None
+            try:
+                return timezone.localtime(value).strftime("%d/%m/%Y %H:%M")
+            except Exception:
+                return value.strftime("%d/%m/%Y %H:%M") if hasattr(value, "strftime") else str(value)
+
+        buyer = getattr(order, "buyer", None)
+        buyer_name = None
+        if buyer:
+            first = (buyer.first_name or "").strip()
+            last = (buyer.last_name or "").strip()
+            buyer_name = " ".join(part for part in (first, last) if part).strip() or getattr(buyer, "email", None)
+
+        sold_subitems = []
+        for relation in obj.subitems.select_related("subitem__biglietto").filter(subitem__is_sold=True).order_by("id"):
+            subitem = relation.subitem
+            biglietto = getattr(subitem, "biglietto", None) if subitem else None
+            sold_subitems.append({
+                "id": getattr(subitem, "id", None),
+                "full_name": getattr(subitem, "full_name", None),
+                "sigillo_fiscale": getattr(biglietto, "sigillo_fiscale", None) if biglietto else None,
+                "sold_at": _fmt_dt(getattr(subitem, "sold_at", None)),
+            })
+
+        return {
+            "order_id": order.id,
+            "purchase_date": _fmt_dt(getattr(order, "paid_at", None) or getattr(order, "created_at", None)),
+            "sold_at": _fmt_dt(getattr(order, "delivered_at", None) or getattr(order, "paid_at", None) or getattr(order, "created_at", None)),
+            "buyer_name": buyer_name,
+            "sold_subitems": sold_subitems,
+        }
 
 
 class MarkListingSoldSerializer(serializers.Serializer):
