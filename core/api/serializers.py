@@ -948,22 +948,39 @@ class TicketUploadReviewSerializer(serializers.ModelSerializer):
         fields = ("id", "status", "found_count", "selectable_count", "error_message", "biglietto_info", "subitems")
 
     def get_subitems(self, obj):
+        rows = obj.extracted_subitems or []
+        code_hashes = [
+            str(row.get("code_hash")).strip()
+            for row in rows
+            if row.get("code_hash")
+        ]
+
+        listed_hashes = set()
+        if code_hashes:
+            listed_hashes = set(
+                ListingSubitem.objects
+                .filter(
+                    listing__status__in=["ACTIVE", "RESERVED"],
+                    subitem__code_hash__in=code_hashes,
+                )
+                .values_list("subitem__code_hash", flat=True)
+            )
+
         items = []
-        for row in (obj.extracted_subitems or []):
+        for row in rows:
             raw = (row.get("code_raw") or "").strip()
-            if raw and len(raw) > 6:
-                masked = ("*" * max(0, len(raw) - 6)) + raw[-6:]
-            else:
-                masked = raw or None
+            code_hash = str(row.get("code_hash") or "").strip()
+            code_type = str(row.get("code_type") or "").strip().upper()
+            sigillo_fiscale = raw if (code_type == "SIGILLO" and raw) else None
             items.append(
                 {
                     "id": int(row.get("id") or 0),
                     "full_name": row.get("full_name"),
                     "price": row.get("price"),
                     "page": row.get("page"),
-                    "code_type": row.get("code_type"),
-                    "code_value": masked,
-                    "is_listed": False,
+                    "code_type": code_type or None,
+                    "sigillo_fiscale": sigillo_fiscale,
+                    "is_listed": code_hash in listed_hashes,
                     "is_sold": False,
                 }
             )
@@ -1013,11 +1030,8 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
     notes = serializers.CharField(allow_blank=True, required=False)
     performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all(), required=False, allow_null=True)
 
-    def _has_active_identifier_conflict(self, upload: TicketUpload, selected_code_hashes):
-        sigillo = upload.biglietto.sigillo_fiscale
+    def _has_active_identifier_conflict(self, selected_code_hashes):
         active = Listing.objects.filter(status__in=["ACTIVE", "RESERVED"])
-        if sigillo and active.filter(subitems__subitem__biglietto__sigillo_fiscale=sigillo).exists():
-            return True
         if selected_code_hashes and active.filter(subitems__subitem__code_hash__in=selected_code_hashes).exists():
             return True
         return False
@@ -1051,7 +1065,7 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
             raise serializers.ValidationError("non puoi rivendere biglietti per eventi gia passati")
 
         selected_code_hashes = [item.get("code_hash") for item in selected_items if item.get("code_hash")]
-        if self._has_active_identifier_conflict(upload, selected_code_hashes):
+        if self._has_active_identifier_conflict(selected_code_hashes):
             raise serializers.ValidationError("sigillo fiscale o barcode gia in vendita")
 
         requested_price = attrs.get("price_each")
