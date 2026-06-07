@@ -1,6 +1,6 @@
 from decimal import Decimal
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import FieldError, ValidationError
@@ -52,6 +52,125 @@ from .models import (
 )
 
 User = get_user_model()
+PRO_EVENT_DAILY_RATE = Decimal("0.20")
+
+
+def _parse_int_or_none(value):
+    try:
+        parsed = int(value)
+        return parsed or None
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_pro_target_start(event_id: int | None = None, performance_id: int | None = None):
+    if performance_id:
+        perf = Performance.objects.filter(pk=performance_id).select_related("evento").first()
+        if perf and perf.starts_at_utc:
+            return perf.starts_at_utc
+
+    if not event_id:
+        return None
+
+    now = dj_timezone.now()
+    perf = (
+        Performance.objects
+        .filter(evento_id=event_id, starts_at_utc__gte=now)
+        .order_by("starts_at_utc")
+        .first()
+    )
+    if perf and perf.starts_at_utc:
+        return perf.starts_at_utc
+
+    fallback = (
+        Performance.objects
+        .filter(evento_id=event_id)
+        .order_by("starts_at_utc")
+        .first()
+    )
+    return getattr(fallback, "starts_at_utc", None)
+
+
+def _build_dynamic_daily_pro_option(event_id: int | None = None, performance_id: int | None = None):
+    start_dt = _resolve_pro_target_start(event_id=event_id, performance_id=performance_id)
+    if not start_dt:
+        return None
+
+    today = dj_timezone.now().date()
+    event_day = start_dt.date()
+    giorni = (event_day - today).days
+    if giorni <= 0:
+        return None
+
+    prezzo = (PRO_EVENT_DAILY_RATE * Decimal(giorni)).quantize(Decimal("0.01"))
+    return {
+        "id": "dynamic-daily-pro",
+        "name": "PRO Giornaliero",
+        "plan_type": "PRO",
+        "duration_days": giorni,
+        "price": str(prezzo),
+        "currency": "EUR",
+        "periodo": "evento_daily",
+        "daily_rate": str(PRO_EVENT_DAILY_RATE.quantize(Decimal("0.01"))),
+        "event_date": start_dt,
+        "event_date_fmt": dj_timezone.localtime(start_dt).strftime("%d/%m/%Y %H:%M") if dj_timezone.is_aware(start_dt) else start_dt.strftime("%d/%m/%Y %H:%M"),
+        "description": "0,20 EUR al giorno fino al giorno prima dell'evento.",
+    }
+
+
+def _compute_secure_abbonamento_terms(request_data, validated_data):
+    plan = validated_data.get("plan")
+    periodo = (request_data.get("periodo") or "").strip().lower()
+    event_id = validated_data.get("event_id") or _parse_int_or_none(request_data.get("event_id"))
+    performance_id = validated_data.get("performance_id") or _parse_int_or_none(request_data.get("performance_id"))
+
+    prezzo = validated_data.get("prezzo")
+    giorni = None
+    mesi = None
+
+    if plan is not None:
+        giorni = plan.duration_days or None
+        prezzo = plan.price
+        if not periodo:
+            periodo = "evento"
+        if periodo.endswith("m"):
+            try:
+                mesi = int(periodo[:-1])
+            except (TypeError, ValueError):
+                mesi = None
+        elif periodo.startswith("evento"):
+            mesi = 0
+    elif periodo == "evento_daily":
+        dynamic = _build_dynamic_daily_pro_option(event_id=event_id, performance_id=performance_id)
+        if not dynamic:
+            raise ValidationError({"periodo": "piano giornaliero non disponibile per questo evento"})
+        giorni = int(dynamic["duration_days"])
+        prezzo = Decimal(str(dynamic["price"]))
+        mesi = 0
+    else:
+        if "data_fine_days" in request_data:
+            try:
+                giorni = int(request_data.get("data_fine_days"))
+            except (TypeError, ValueError):
+                giorni = None
+        if not giorni and periodo.endswith("m"):
+            try:
+                mesi = int(periodo[:-1])
+                giorni = 30 * mesi
+            except (TypeError, ValueError):
+                mesi = None
+        elif periodo == "evento":
+            giorni = 60
+            mesi = 0
+
+    data_fine = dj_timezone.now() + timedelta(days=giorni) if giorni else None
+    return {
+        "prezzo": prezzo,
+        "giorni": giorni,
+        "data_fine": data_fine,
+        "periodo": periodo or None,
+        "mesi": mesi,
+    }
 
 
 def _available_listing_qty(listing: Listing) -> int:
@@ -464,6 +583,20 @@ class AlertPlanViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = AlertPlanSerializer
     permission_classes = [permissions.AllowAny]  # Visibile anche a utenti non autenticati
 
+    @action(detail=False, methods=["get"], permission_classes=[permissions.AllowAny], url_path="pro-options")
+    def pro_options(self, request):
+        event_id = _parse_int_or_none(request.query_params.get("event_id"))
+        performance_id = _parse_int_or_none(request.query_params.get("performance_id"))
+
+        plans = self.get_queryset().filter(plan_type="PRO")
+        data = AlertPlanSerializer(plans, many=True).data
+
+        dynamic_plan = _build_dynamic_daily_pro_option(event_id=event_id, performance_id=performance_id)
+        if dynamic_plan:
+            data.append(dynamic_plan)
+
+        return Response(data)
+
 
 class AbbonamentoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     queryset = Abbonamento.objects.select_related("utente", "plan", "sconto").all()
@@ -479,58 +612,14 @@ class AbbonamentoViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         return qs.filter(utente=self.request.user)
 
     def perform_create(self, serializer):
-        from datetime import timedelta
-        from django.utils import timezone
-        
-        # Recupera il piano se specificato
-        plan = serializer.validated_data.get('plan')
-        
-        # Calcola durata in giorni
-        giorni = None
-        if plan and plan.duration_days:
-            # Usa la durata del piano
-            giorni = plan.duration_days
-        elif 'data_fine_days' in self.request.data:
-            # Usa il valore custom dal frontend (per compatibilità)
-            try:
-                giorni = int(self.request.data.get('data_fine_days'))
-            except (ValueError, TypeError):
-                giorni = None
-        
-        # Se non c'è un valore, prova a derivarlo dal periodo
-        if not giorni:
-            periodo = self.request.data.get('periodo', '').strip().lower()
-            if periodo and periodo.endswith('m'):
-                try:
-                    mesi = int(periodo[:-1])
-                    giorni = 30 * mesi
-                except (ValueError, TypeError):
-                    pass
-            elif periodo == 'evento':
-                giorni = 60  # Default per tipo "evento"
-        
-        # Calcola data_fine
-        data_fine = None
-        if giorni:
-            data_fine = timezone.now() + timedelta(days=giorni)
-        
-        # Estrai periodo e mesi dal request
-        periodo = self.request.data.get('periodo', '')
-        mesi = None
-        if periodo and periodo.endswith('m'):
-            try:
-                mesi = int(periodo[:-1])
-            except (ValueError, TypeError):
-                mesi = None
-        elif periodo == 'evento':
-            mesi = 0
-        
-        # Salva con tutti i campi calcolati
+        secure_terms = _compute_secure_abbonamento_terms(self.request.data, serializer.validated_data)
+
         serializer.save(
             utente=self.request.user,
-            data_fine=data_fine,
-            periodo=periodo or None,
-            mesi=mesi
+            prezzo=secure_terms["prezzo"],
+            data_fine=secure_terms["data_fine"],
+            periodo=secure_terms["periodo"],
+            mesi=secure_terms["mesi"],
         )
 
 

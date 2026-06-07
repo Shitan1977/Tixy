@@ -258,6 +258,8 @@ class AbbonamentoSerializer(serializers.ModelSerializer):
     utente_info = ShortUserProfileSerializer(source="utente", read_only=True)
     plan_info = AlertPlanSerializer(source="plan", read_only=True)
     sconto_info = ScontiSerializer(source="sconto", read_only=True)
+    event_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    performance_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     
     # Campi calcolati automaticamente (read-only nel response)
     giorni_rimasti = serializers.SerializerMethodField()
@@ -275,6 +277,11 @@ class AbbonamentoSerializer(serializers.ModelSerializer):
     def get_is_expired(self, obj):
         """Verifica se l'abbonamento è scaduto"""
         return obj.is_expired()
+
+    def create(self, validated_data):
+        validated_data.pop("event_id", None)
+        validated_data.pop("performance_id", None)
+        return super().create(validated_data)
 
 
 class MonitoraggioSerializer(serializers.ModelSerializer):
