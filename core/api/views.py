@@ -23,7 +23,7 @@ from rest_framework.views import APIView
 
 from drf_yasg.utils import swagger_auto_schema
 
-from .utils import invia_otp_email
+from .utils import invia_otp_email, invia_email_venditore_vendita, invia_email_acquirente_consegna
 from .validation import file_validation
 from .filters import PerformanceSearchFilter, EventSearchFilter
 
@@ -1143,8 +1143,8 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     def confirm_payment(self, request, pk=None):
         """
         POST /api/orders/{id}/confirm-payment/
-        Segna l'ordine come PAID + DELIVERED, i TicketSubitem come is_sold,
-        il Listing come SOLD. Usato dal frontend dopo pagamento simulato o webhook.
+        Segna l'ordine come PAID e i TicketSubitem come is_sold.
+        Il venditore ha 24h (da paid_at) per caricare il biglietto aggiornato.
         """
         order = self.get_object()
 
@@ -1155,60 +1155,179 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             return Response({"detail": "already confirmed"}, status=200)
 
         now_ts = dj_timezone.now()
+
         with transaction.atomic():
-            order.status = "DELIVERED"
+            order.status = "PAID"
             order.paid_at = now_ts
-            order.delivered_at = now_ts
-            order.save(update_fields=["status", "paid_at", "delivered_at"])
+            order.save(update_fields=["status", "paid_at"])
 
-            # Marca i subitem venduti
             listing = order.listing
-            listing.subitems.filter(subitem__is_sold=False).update()  # select
-            for lsi in listing.subitems.select_related("subitem").filter(subitem__is_sold=False):
+            unsold_relations = list(
+                listing.subitems
+                .select_related("subitem")
+                .filter(subitem__is_sold=False)
+                .order_by("subitem_id", "id")
+            )
+
+            if len(unsold_relations) < int(order.qty or 0):
+                return Response(
+                    {"detail": "ticket availability mismatch"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            to_sell = unsold_relations[: int(order.qty or 0)]
+            for lsi in to_sell:
                 lsi.subitem.is_sold = True
-                lsi.subitem.save(update_fields=["is_sold"])
+                if hasattr(lsi.subitem, "sold_at"):
+                    lsi.subitem.sold_at = now_ts
+                    lsi.subitem.save(update_fields=["is_sold", "sold_at"])
+                else:
+                    lsi.subitem.save(update_fields=["is_sold"])
 
-            # Segna il listing SOLD
-            listing.status = "SOLD"
-            listing.qty = 0
-            listing.save(update_fields=["status", "qty", "updated_at"])
+            remaining_unsold = listing.subitems.filter(subitem__is_sold=False).count()
+            listing.qty = remaining_unsold
+            listing.status = "ACTIVE" if remaining_unsold > 0 else "SOLD"
+            listing.save(update_fields=["qty", "status", "updated_at"])
 
-        return Response({"detail": "confirmed", "order_id": order.id, "status": order.status}, status=200)
+        # deadline calcolata dinamicamente: paid_at + 24h
+        deadline = now_ts + timedelta(hours=24)
+        try:
+            invia_email_venditore_vendita(order, deadline)
+        except Exception:
+            pass
+
+        return Response({
+            "detail": "confirmed",
+            "order_id": order.id,
+            "status": order.status,
+            "seller_deadline": deadline.isoformat(),
+        }, status=200)
+
+    @action(detail=True, methods=["post"], url_path="seller-upload",
+            permission_classes=[permissions.IsAuthenticated],
+            parser_classes=[MultiPartParser, FormParser, JSONParser])
+    def seller_upload(self, request, pk=None):
+        """
+        POST /api/orders/{id}/seller-upload/
+        Il venditore carica il PDF aggiornato (nome + sigillo fiscale cambiati).
+        Il file sovrascrive il Biglietto collegato al listing tramite ListingTicket.
+        Segna l'ordine come DELIVERED e notifica l'acquirente.
+        """
+        import hashlib as _hashlib
+        import os as _os
+
+        order = get_object_or_404(
+            OrderTicket.objects.select_related("listing", "listing__seller", "buyer"),
+            pk=pk,
+        )
+        seller = order.listing.seller
+        if not (request.user.is_staff or request.user.id == seller.id):
+            raise PermissionDenied("not allowed")
+
+        if order.status != "PAID":
+            return Response({"detail": f"ordine in stato '{order.status}': upload non consentito"}, status=400)
+
+        file_obj = request.FILES.get("path_file")
+        if not file_obj:
+            return Response({"detail": "Carica il file PDF aggiornato (campo: path_file)"}, status=400)
+
+        # Trova il Biglietto collegato al listing
+        biglietto = None
+        lt = ListingTicket.objects.filter(listing=order.listing).select_related("biglietto").first()
+        if lt and lt.biglietto:
+            biglietto = lt.biglietto
+        if biglietto is None:
+            lsi = (ListingSubitem.objects
+                   .filter(listing=order.listing)
+                   .select_related("subitem__biglietto").first())
+            if lsi and lsi.subitem and lsi.subitem.biglietto:
+                biglietto = lsi.subitem.biglietto
+
+        file_content = file_obj.read()
+        new_hash = _hashlib.sha256(file_content).hexdigest()
+        ext = _os.path.splitext(file_obj.name)[1] or ".pdf"
+        dest_name = f"delivery/order_{order.id}_{new_hash[:12]}{ext}"
+
+        from django.core.files.base import ContentFile as _CF
+        saved_path = default_storage.save(dest_name, _CF(file_content))
+
+        if biglietto:
+            # Sovrascrive il file sul Biglietto esistente
+            if biglietto.path_file:
+                try:
+                    default_storage.delete(biglietto.path_file.name)
+                except Exception:
+                    pass
+            biglietto.path_file.name = saved_path
+            biglietto.nome_file = file_obj.name
+            biglietto.hash_file = new_hash
+            biglietto.mime_type = file_obj.content_type or "application/pdf"
+            biglietto.file_size = len(file_content)
+            biglietto.save(update_fields=["path_file", "nome_file", "hash_file", "mime_type", "file_size"])
+        else:
+            # Crea un Biglietto di consegna e lo collega al listing
+            biglietto = Biglietto(
+                nome_file=file_obj.name,
+                hash_file=new_hash,
+                mime_type=file_obj.content_type or "application/pdf",
+                file_size=len(file_content),
+                is_valid=True,
+            )
+            biglietto.path_file.name = saved_path
+            biglietto.save()
+
+        # Garantisce sempre il collegamento listing->biglietto usato dal download buyer.
+        ListingTicket.objects.get_or_create(listing=order.listing, biglietto=biglietto)
+
+        now_ts = dj_timezone.now()
+        order.status = "DELIVERED"
+        order.delivered_at = now_ts
+        order.save(update_fields=["status", "delivered_at"])
+
+        try:
+            invia_email_acquirente_consegna(order)
+        except Exception:
+            pass
+
+        return Response({"detail": "biglietto caricato e ordine consegnato", "order_id": order.id}, status=200)
 
     @action(detail=True, methods=["get"], url_path="download", permission_classes=[permissions.IsAuthenticated])
     def download(self, request, pk=None):
         """
         GET /api/orders/{id}/download/
-        Serve il PDF del biglietto direttamente.
-        Sicurezza: solo il buyer (o staff) può scaricare.
+        Disponibile solo dopo che il venditore ha caricato il biglietto (status=DELIVERED).
+        Serve il file dal Biglietto collegato al listing (già sovrascritto dal venditore).
         """
         import mimetypes as _mimetypes
-        from django.http import FileResponse, HttpResponseNotFound
+        from django.http import FileResponse
 
         order = self.get_object()
 
         if not (request.user.is_staff or order.buyer_id == request.user.id):
             raise PermissionDenied("not allowed")
 
-        # Cerca il Biglietto tramite ListingTicket (relazione principale)
+        if order.status != "DELIVERED":
+            return Response(
+                {"detail": "biglietto non ancora disponibile — il venditore sta preparando la consegna",
+                 "status": order.status},
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        # Trova il file aggiornato tramite ListingTicket
         biglietto = None
-        lt = (
-            ListingTicket.objects
-            .filter(listing=order.listing)
-            .select_related("biglietto")
-            .first()
-        )
+        lt = (ListingTicket.objects
+              .filter(listing=order.listing)
+              .select_related("biglietto")
+              .first())
         if lt and lt.biglietto and lt.biglietto.path_file:
             biglietto = lt.biglietto
 
-        # Fallback: tramite ListingSubitem → TicketSubitem → Biglietto
+        # Fallback: alcune consegne legacy sono collegate solo ai subitems del listing.
         if biglietto is None:
-            lsi = (
-                ListingSubitem.objects
-                .filter(listing=order.listing)
-                .select_related("subitem__biglietto")
-                .first()
-            )
+            lsi = (ListingSubitem.objects
+                   .filter(listing=order.listing)
+                   .select_related("subitem__biglietto")
+                   .first())
             if lsi and lsi.subitem and lsi.subitem.biglietto and lsi.subitem.biglietto.path_file:
                 biglietto = lsi.subitem.biglietto
 
@@ -1467,6 +1586,38 @@ class MyPurchasesView(generics.ListAPIView):
             starts = getattr(perf, "starts_at_utc", None)
             venue_name = getattr(luogo, "nome", "") if luogo else ""
 
+            has_ticket_file = False
+            if o.status == "DELIVERED":
+                lt = (ListingTicket.objects
+                      .filter(listing=o.listing)
+                      .select_related("biglietto")
+                      .first())
+                if lt and lt.biglietto and lt.biglietto.path_file:
+                    has_ticket_file = True
+                else:
+                    lsi = (ListingSubitem.objects
+                           .filter(listing=o.listing)
+                           .select_related("subitem__biglietto")
+                           .first())
+                    if lsi and lsi.subitem and lsi.subitem.biglietto and lsi.subitem.biglietto.path_file:
+                        has_ticket_file = True
+
+            is_downloadable = o.status == "DELIVERED" and has_ticket_file
+            # deadline calcolata dinamicamente: paid_at + 24h (nessun campo model extra)
+            deadline_iso = (o.paid_at + timedelta(hours=24)).isoformat() if o.paid_at and o.status == "PAID" else None
+
+            # Label descrittiva per il buyer
+            if o.status == "DELIVERED" and has_ticket_file:
+                delivery_label = "Pronto per il download"
+            elif o.status == "DELIVERED":
+                delivery_label = "Biglietto in preparazione"
+            elif o.status == "PAID":
+                delivery_label = "In attesa del biglietto aggiornato"
+            elif o.status == "PENDING":
+                delivery_label = "Pagamento in corso"
+            else:
+                delivery_label = o.status
+
             return {
                 "id": o.id,
                 "listing_id": o.listing_id,
@@ -1477,6 +1628,9 @@ class MyPurchasesView(generics.ListAPIView):
                 "price_total": str(o.total_price),
                 "currency": o.currency,
                 "status": o.status,
+                "delivery_label": delivery_label,
+                "is_downloadable": is_downloadable,
+                "seller_deadline": deadline_iso,
                 "download_api_url": f"/api/orders/{o.id}/download/",
             }
 

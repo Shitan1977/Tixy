@@ -822,6 +822,9 @@ class MyPurchasesItemSerializer(serializers.Serializer):
     price_total = serializers.CharField()
     currency = serializers.CharField()
     status = serializers.CharField()
+    delivery_label = serializers.CharField(default="")
+    is_downloadable = serializers.BooleanField(default=False)
+    seller_deadline = serializers.CharField(allow_null=True, default=None)
     download_api_url = serializers.CharField()
 # --- 1A) Helper: calcolo hash per dedup file uguale ---
 def sha256_of_file(inmem_file) -> str:
@@ -1174,7 +1177,10 @@ class ListingSelectionUpdateSerializer(serializers.Serializer):
 
         if not (request.user.is_staff or request.user.id == listing.seller_id):
             raise serializers.ValidationError("not allowed")
-        if listing.status != "ACTIVE":
+
+        unsold_count = listing.subitems.filter(subitem__is_sold=False).count()
+        can_reactivate = listing.status == "SOLD" and unsold_count > 0
+        if listing.status != "ACTIVE" and not can_reactivate:
             raise serializers.ValidationError("puoi modificare solo annunci attivi")
 
         requested_ids = list(dict.fromkeys(attrs.get("subitem_ids") or []))
@@ -1217,6 +1223,7 @@ class ListingSelectionUpdateSerializer(serializers.Serializer):
         attrs["_current_unsold_ids"] = current_unsold_ids
         attrs["_current_sold_ids"] = current_sold_ids
         attrs["_selected_qs"] = selected_qs
+        attrs["_can_reactivate"] = can_reactivate
         return attrs
 
     def create(self, validated_data):
@@ -1230,7 +1237,9 @@ class ListingSelectionUpdateSerializer(serializers.Serializer):
 
         with transaction.atomic():
             locked_listing = Listing.objects.select_for_update().get(pk=listing.pk)
-            if locked_listing.status != "ACTIVE":
+            locked_unsold_count = locked_listing.subitems.filter(subitem__is_sold=False).count()
+            can_reactivate_locked = locked_listing.status == "SOLD" and locked_unsold_count > 0
+            if locked_listing.status != "ACTIVE" and not can_reactivate_locked:
                 raise serializers.ValidationError("puoi modificare solo annunci attivi")
 
             if to_remove:
@@ -1254,7 +1263,11 @@ class ListingSelectionUpdateSerializer(serializers.Serializer):
                 subitems_to_add.update(is_listed=True)
 
             locked_listing.qty = len(requested_ids)
-            locked_listing.save(update_fields=["qty", "updated_at"])
+            update_fields = ["qty", "updated_at"]
+            if can_reactivate_locked:
+                locked_listing.status = "ACTIVE"
+                update_fields.append("status")
+            locked_listing.save(update_fields=update_fields)
 
         return {
             "listing_id": listing.id,
@@ -1398,8 +1411,10 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
 
         return {
             "order_id": order.id,
+            "order_status": getattr(order, "status", None),
             "purchase_date": _fmt_dt(getattr(order, "paid_at", None) or getattr(order, "created_at", None)),
             "sold_at": _fmt_dt(getattr(order, "delivered_at", None) or getattr(order, "paid_at", None) or getattr(order, "created_at", None)),
+            "seller_deadline": (getattr(order, "paid_at", None) + timedelta(hours=24)).isoformat() if getattr(order, "paid_at", None) and getattr(order, "status", None) == "PAID" else None,
             "buyer_name": buyer_name,
             "sold_subitems": sold_subitems,
         }
