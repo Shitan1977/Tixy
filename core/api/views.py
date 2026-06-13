@@ -52,8 +52,6 @@ from .models import (
 )
 
 User = get_user_model()
-PRO_EVENT_DAILY_RATE = Decimal("0.20")
-
 
 def _parse_int_or_none(value):
     try:
@@ -92,11 +90,13 @@ def _resolve_pro_target_start(event_id: int | None = None, performance_id: int |
 
 
 def _build_dynamic_daily_pro_option(event_id: int | None = None, performance_id: int | None = None):
-    # Legge la tariffa giornaliera dal record DB (configurabile da admin), fallback costante hardcoded
+    """
+    Costruisce l'opzione piano giornaliero calcolando i giorni reali fino all'evento.
+    Restituisce None se il piano non è configurato in admin o l'evento non ha date future.
+    """
     db_plan = AlertPlan.objects.filter(plan_type="PRO", periodo="evento_daily").first()
-    daily_rate = db_plan.price if db_plan else PRO_EVENT_DAILY_RATE
-    plan_id = db_plan.id if db_plan else "dynamic-daily-pro"
-    plan_name = db_plan.name if db_plan else "PRO Giornaliero"
+    if not db_plan:
+        return None  # Piano non configurato: crearlo dall'area admin
 
     start_dt = _resolve_pro_target_start(event_id=event_id, performance_id=performance_id)
     if not start_dt:
@@ -108,20 +108,21 @@ def _build_dynamic_daily_pro_option(event_id: int | None = None, performance_id:
     if giorni <= 0:
         return None
 
-    prezzo = (Decimal(str(daily_rate)) * Decimal(giorni)).quantize(Decimal("0.01"))
-    daily_rate_fmt = Decimal(str(daily_rate)).quantize(Decimal("0.01"))
+    daily_rate = Decimal(str(db_plan.price))
+    prezzo = (daily_rate * Decimal(giorni)).quantize(Decimal("0.01"))
+    daily_rate_fmt = daily_rate.quantize(Decimal("0.01"))
     return {
-        "id": plan_id,
-        "name": plan_name,
+        "id": db_plan.id,
+        "name": db_plan.name,
         "plan_type": "PRO",
         "duration_days": giorni,
         "price": str(prezzo),
-        "currency": "EUR",
+        "currency": db_plan.currency,
         "periodo": "evento_daily",
         "daily_rate": str(daily_rate_fmt),
         "event_date": start_dt,
         "event_date_fmt": dj_timezone.localtime(start_dt).strftime("%d/%m/%Y %H:%M") if dj_timezone.is_aware(start_dt) else start_dt.strftime("%d/%m/%Y %H:%M"),
-        "description": f"{daily_rate_fmt} EUR al giorno fino al giorno prima dell'evento.",
+        "description": f"{daily_rate_fmt} {db_plan.currency} al giorno fino al giorno prima dell'evento.",
     }
 
 
@@ -638,12 +639,14 @@ class AlertPlanViewSet(viewsets.ReadOnlyModelViewSet):
         event_id = _parse_int_or_none(request.query_params.get("event_id"))
         performance_id = _parse_int_or_none(request.query_params.get("performance_id"))
 
-        plans = self.get_queryset().filter(plan_type="PRO")
-        data = AlertPlanSerializer(plans, many=True).data
+        # Piani fissi PRO (escludi evento_daily: viene restituito solo nella versione calcolata)
+        plans = self.get_queryset().filter(plan_type="PRO").exclude(periodo="evento_daily")
+        data = list(AlertPlanSerializer(plans, many=True).data)
 
+        # Piano giornaliero: calcolato in base alla data evento (duration_days reale)
         dynamic_plan = _build_dynamic_daily_pro_option(event_id=event_id, performance_id=performance_id)
         if dynamic_plan:
-            data.append(dynamic_plan)
+            data.insert(0, dynamic_plan)  # In evidenza, mostrato per primo
 
         return Response(data)
 
