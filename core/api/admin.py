@@ -15,7 +15,7 @@ from .models import (
     Piattaforma, EventoPiattaforma, PerformancePiattaforma, InventorySnapshot,
     Sconti, AlertPlan, Abbonamento, Monitoraggio, Notifica, AlertTrigger, EventFollow,
     Biglietto, Listing, ListingTicket, OrderTicket, Payment,
-    Rivendita, Acquisto, Recensione, SupportTicket, SupportMessage
+    Rivendita, Acquisto, Recensione, SupportTicket, SupportMessage, PushDevice
 )
 
 # Unfold
@@ -347,13 +347,48 @@ class ScontiAdmin(ModelAdmin):
 
 @admin.register(AlertPlan)
 class AlertPlanAdmin(ModelAdmin):
-    # Custom Admin Pannel
     paginator = InfinitePaginator
     show_full_result_count = True
 
-    list_display = ("id", "name", "plan_type", "duration_days", "price", "currency")
-    list_display_links = ("id","name",)
-    list_filter = ("plan_type",)
+    list_display = ("id", "name", "plan_type", "periodo_label", "prezzo_display", "currency")
+    list_display_links = ("id", "name")
+    list_filter = ("plan_type", "periodo")
+
+    fieldsets = (
+        ("Informazioni piano", {
+            "fields": ("name", "plan_type", "periodo", "currency"),
+        }),
+        ("Prezzo e durata", {
+            "fields": ("price", "duration_days"),
+            "description": (
+                "Piani a durata fissa (1m, 3m, …, evento): inserire il prezzo totale e il numero di giorni. "
+                "Piano Giornaliero (evento_daily): inserire solo la tariffa per singolo giorno (es. 0.20 per 20 cent/giorno). "
+                "Il campo Durata giorni viene impostato automaticamente a 0 e non è necessario modificarlo."
+            ),
+        }),
+    )
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj and obj.periodo == "evento_daily":
+            return ["duration_days"]
+        return []
+
+    def save_model(self, request, obj, form, change):
+        if obj.periodo == "evento_daily":
+            obj.duration_days = 0
+        super().save_model(request, obj, form, change)
+
+    @admin.display(description="Periodo")
+    def periodo_label(self, obj):
+        if not obj.periodo:
+            return "—"
+        return dict(AlertPlan.PERIODO_CHOICES).get(obj.periodo, obj.periodo)
+
+    @admin.display(description="Prezzo")
+    def prezzo_display(self, obj):
+        if obj.periodo == "evento_daily":
+            return f"€ {obj.price} / giorno"
+        return f"€ {obj.price}"
 
 @admin.register(Abbonamento)
 class AbbonamentoAdmin(ModelAdmin):
@@ -626,3 +661,15 @@ class SupportTicketAdmin(ModelAdmin):
     def mark_closed(self, request, queryset):
         queryset.update(status="CLOSED")
     mark_closed.short_description = "Chiudi i ticket selezionati"
+
+
+@admin.register(PushDevice)
+class PushDeviceAdmin(admin.ModelAdmin):
+    list_display = ("utente", "platform", "is_active", "token_short", "updated_at")
+    list_filter = ("platform", "is_active")
+    search_fields = ("utente__email", "token", "device_id")
+    readonly_fields = ("token", "created_at", "updated_at")
+
+    def token_short(self, obj):
+        return obj.token[:40] + "…" if len(obj.token) > 40 else obj.token
+    token_short.short_description = "Token"

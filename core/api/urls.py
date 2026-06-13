@@ -9,7 +9,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     # user
     UserProfileViewSet, UserRegistrationView, ConfirmOTPView, UserProfileAPIView, PublicUserDetailView,
-    ChangePasswordView,
+    ChangePasswordView, RegisterPushTokenView,
     # catalogo
     EventoViewSet, BigliettoUploadView,
     ArtistaViewSet, LuoghiViewSet, CategoriaViewSet, PiattaformaViewSet, EventoPiattaformaViewSet,
@@ -96,6 +96,7 @@ urlpatterns = [
     # user direct
     path('profile/', UserProfileAPIView.as_view(), name='user-profile'),
     path('profile/change-password/', ChangePasswordView.as_view(), name='change-password'),
+    path('profile/push-token/', RegisterPushTokenView.as_view(), name='push-token'),
     path('register/', UserRegistrationView.as_view(), name='user-register'),
     path('auth/confirm-otp/', ConfirmOTPView.as_view(), name='confirm-otp'),
     path('auth/resend-otp/', ResendOTPView.as_view(), name='auth-resend-otp'),

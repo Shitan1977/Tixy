@@ -393,11 +393,34 @@ class AlertPlan(models.Model):
         ("FREE", "Free"),
         ("PRO", "PRO"),
     ]
-    
+    PERIODO_CHOICES = [
+        ("1m", "1 mese"),
+        ("3m", "3 mesi"),
+        ("6m", "6 mesi"),
+        ("12m", "12 mesi"),
+        ("evento", "Fino all'evento (durata fissa)"),
+        ("evento_daily", "Giornaliero – tariffa al giorno fino all'evento"),
+    ]
+
     name = models.CharField(max_length=80)
     plan_type = models.CharField(max_length=4, choices=PLAN_TYPE, default="FREE", help_text="Tipo di piano: Free o PRO")
-    duration_days = models.IntegerField()
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    periodo = models.CharField(
+        max_length=20,
+        choices=PERIODO_CHOICES,
+        blank=True,
+        null=True,
+        help_text="Per 'Giornaliero' il campo Prezzo contiene la tariffa al giorno (es. 0.20). Per tutti gli altri è il prezzo totale.",
+    )
+    duration_days = models.IntegerField(
+        default=0,
+        blank=True,
+        help_text="Numero di giorni di durata. Per il piano Giornaliero lasciare 0 (viene calcolato automaticamente dall'evento).",
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Prezzo totale del piano. Per il piano Giornaliero indica la tariffa per singolo giorno (es. 0.20).",
+    )
     currency = models.CharField(max_length=3, default="EUR")
 
     def __str__(self):
@@ -493,6 +516,28 @@ class Notifica(models.Model):
         indexes = [
             models.Index(fields=["monitoraggio"]),
             models.Index(fields=["dedupe_key"]),
+        ]
+
+
+class PushDevice(models.Model):
+    PLATFORM = [("android", "Android"), ("ios", "iOS"), ("unknown", "Unknown")]
+
+    utente = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name="push_devices", verbose_name="Utente")
+    token = models.CharField(max_length=255, unique=True, verbose_name="Expo Push Token")
+    platform = models.CharField(max_length=10, choices=PLATFORM, default="unknown", verbose_name="Piattaforma")
+    device_id = models.CharField(max_length=255, blank=True, null=True, verbose_name="Device ID")
+    is_active = models.BooleanField(default=True, verbose_name="Attivo")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.utente.email} [{self.platform}] {self.token[:40]}"
+
+    class Meta:
+        verbose_name = "Push Device"
+        verbose_name_plural = "Push Devices"
+        indexes = [
+            models.Index(fields=["utente", "is_active"]),
         ]
 
 

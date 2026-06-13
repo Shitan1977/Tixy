@@ -92,6 +92,12 @@ def _resolve_pro_target_start(event_id: int | None = None, performance_id: int |
 
 
 def _build_dynamic_daily_pro_option(event_id: int | None = None, performance_id: int | None = None):
+    # Legge la tariffa giornaliera dal record DB (configurabile da admin), fallback costante hardcoded
+    db_plan = AlertPlan.objects.filter(plan_type="PRO", periodo="evento_daily").first()
+    daily_rate = db_plan.price if db_plan else PRO_EVENT_DAILY_RATE
+    plan_id = db_plan.id if db_plan else "dynamic-daily-pro"
+    plan_name = db_plan.name if db_plan else "PRO Giornaliero"
+
     start_dt = _resolve_pro_target_start(event_id=event_id, performance_id=performance_id)
     if not start_dt:
         return None
@@ -102,19 +108,20 @@ def _build_dynamic_daily_pro_option(event_id: int | None = None, performance_id:
     if giorni <= 0:
         return None
 
-    prezzo = (PRO_EVENT_DAILY_RATE * Decimal(giorni)).quantize(Decimal("0.01"))
+    prezzo = (Decimal(str(daily_rate)) * Decimal(giorni)).quantize(Decimal("0.01"))
+    daily_rate_fmt = Decimal(str(daily_rate)).quantize(Decimal("0.01"))
     return {
-        "id": "dynamic-daily-pro",
-        "name": "PRO Giornaliero",
+        "id": plan_id,
+        "name": plan_name,
         "plan_type": "PRO",
         "duration_days": giorni,
         "price": str(prezzo),
         "currency": "EUR",
         "periodo": "evento_daily",
-        "daily_rate": str(PRO_EVENT_DAILY_RATE.quantize(Decimal("0.01"))),
+        "daily_rate": str(daily_rate_fmt),
         "event_date": start_dt,
         "event_date_fmt": dj_timezone.localtime(start_dt).strftime("%d/%m/%Y %H:%M") if dj_timezone.is_aware(start_dt) else start_dt.strftime("%d/%m/%Y %H:%M"),
-        "description": "0,20 EUR al giorno fino al giorno prima dell'evento.",
+        "description": f"{daily_rate_fmt} EUR al giorno fino al giorno prima dell'evento.",
     }
 
 
@@ -129,17 +136,27 @@ def _compute_secure_abbonamento_terms(request_data, validated_data):
     mesi = None
 
     if plan is not None:
-        giorni = plan.duration_days or None
-        prezzo = plan.price
-        if not periodo:
-            periodo = "evento"
-        if periodo.endswith("m"):
-            try:
-                mesi = int(periodo[:-1])
-            except (TypeError, ValueError):
-                mesi = None
-        elif periodo.startswith("evento"):
+        if getattr(plan, "periodo", None) == "evento_daily":
+            # Piano giornaliero: il prezzo viene calcolato dal backend in base alla data evento
+            dynamic = _build_dynamic_daily_pro_option(event_id=event_id, performance_id=performance_id)
+            if not dynamic:
+                raise ValidationError({"periodo": "piano giornaliero non disponibile per questo evento"})
+            giorni = int(dynamic["duration_days"])
+            prezzo = Decimal(str(dynamic["price"]))
             mesi = 0
+            periodo = "evento_daily"
+        else:
+            giorni = plan.duration_days or None
+            prezzo = plan.price
+            if not periodo:
+                periodo = "evento"
+            if periodo.endswith("m"):
+                try:
+                    mesi = int(periodo[:-1])
+                except (TypeError, ValueError):
+                    mesi = None
+            elif periodo.startswith("evento"):
+                mesi = 0
     elif periodo == "evento_daily":
         dynamic = _build_dynamic_daily_pro_option(event_id=event_id, performance_id=performance_id)
         if not dynamic:
@@ -328,6 +345,39 @@ class ChangePasswordView(APIView):
             {'detail': 'Password modificata con successo'},
             status=status.HTTP_200_OK
         )
+
+
+class RegisterPushTokenView(APIView):
+    """Registra o aggiorna il token Expo Push per il dispositivo corrente (Android + iOS)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        token = (request.data.get("push_token") or "").strip()
+        platform = (request.data.get("platform") or "unknown").strip().lower()
+        device_id = (request.data.get("device_id") or "").strip() or None
+
+        if not token:
+            return Response({"error": "push_token required"}, status=status.HTTP_400_BAD_REQUEST)
+        if platform not in ("android", "ios", "unknown"):
+            platform = "unknown"
+
+        from .models import PushDevice
+        device, _ = PushDevice.objects.update_or_create(
+            token=token,
+            defaults={
+                "utente": request.user,
+                "platform": platform,
+                "device_id": device_id,
+                "is_active": True,
+            },
+        )
+        return Response({"success": True, "device_id": device.id})
+
+    def delete(self, request):
+        """Disattiva tutti i device dell'utente al logout."""
+        from .models import PushDevice
+        PushDevice.objects.filter(utente=request.user, is_active=True).update(is_active=False)
+        return Response({"success": True})
 
 
 class UserRegistrationView(generics.CreateAPIView):
