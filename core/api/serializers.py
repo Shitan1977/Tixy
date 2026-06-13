@@ -801,16 +801,32 @@ class ProSubscriptionItemSerializer(serializers.Serializer):
         if perf and hasattr(perf, "id"):
             performance_id_value = perf.id
 
+        # Period label — mappatura periodo → etichetta leggibile
+        _period_map = {
+            "1m": "1 mese", "3m": "3 mesi", "6m": "6 mesi", "12m": "12 mesi",
+            "evento": "Fino all'evento", "evento_daily": "Giornaliero",
+        }
+        periodo_raw = getattr(ab, "periodo", None) if ab else None
+        plan_name = getattr(getattr(ab, "plan", None), "name", None) if ab else None
+        period_label = (
+            _period_map.get(str(periodo_raw).strip().lower(), "")
+            if periodo_raw else ""
+        ) or plan_name or ""
+
+        cover_url = getattr(ev, "immagine_url", None) if ev else None
+
         return {
             "id": getattr(obj, "id", None),
             "event_id": event_id_value,
             "performance_id": performance_id_value,
             "event_title": title,
+            "cover_url": cover_url,
             "event_date": event_date,
             "activated_at": activated_at,
             "expires_at": expires,
             "status": status,
             "status_label": labels.get(status, status.title()),
+            "period_label": period_label,
         }
 class MyPurchasesItemSerializer(serializers.Serializer):
     id = serializers.IntegerField()

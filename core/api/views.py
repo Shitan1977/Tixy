@@ -734,7 +734,7 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         Elenco dei monitoraggi legati ad abbonamenti PRO dell'utente loggato.
         Serializzazione 'piatta' per la UI (date + stato).
         """
-        qs_base = (
+        rows = list(
             self.get_queryset()
             .select_related(
                 "abbonamento", "abbonamento__plan",
@@ -742,44 +742,12 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
                 "performance", "performance__evento",
             )
             .filter(abbonamento__utente=request.user)
+            .filter(
+                Q(abbonamento__plan__plan_type="PRO") |
+                Q(abbonamento__prezzo__gt=0)
+            )
+            .order_by("-abbonamento__data_inizio")
         )
-
-        # Usa sempre fallback Python per maggiore flessibilità
-        # Includi TUTTI gli abbonamenti a pagamento (prezzo > 0), indipendentemente dal piano
-        rows = list(qs_base)  # materializziamo dalla query base
-
-        def is_pro(item):
-            ab = item.abbonamento
-            if not ab:
-                return False
-            
-            # Controlla il prezzo (abbonamenti a pagamento = PRO)
-            try:
-                prezzo = float(getattr(ab, "prezzo", 0) or 0)
-            except Exception:
-                prezzo = 0
-            
-            # Se ha prezzo > 0, è un abbonamento PRO
-            if prezzo > 0:
-                return True
-            
-            # Altrimenti verifica se il piano contiene "PRO"
-            p = getattr(ab, "plan", None)
-            if p:
-                txt = " ".join([
-                    str(getattr(p, "name", "") or ""),
-                    str(getattr(p, "slug", "") or ""),
-                    str(getattr(p, "nome", "") or ""),
-                    str(getattr(p, "titolo", "") or ""),
-                    str(getattr(p, "tipo", "") or ""),
-                    str(getattr(p, "livello", "") or ""),
-                ]).lower()
-                # euristica: contiene "pro" o è esattamente "pro"
-                return ("pro" in txt) or (txt.strip() == "pro")
-            
-            return False
-
-        rows = [r for r in rows if is_pro(r)]
 
         # paginazione DRF funziona anche con liste
         page = self.paginate_queryset(rows)
