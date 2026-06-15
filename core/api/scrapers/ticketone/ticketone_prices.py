@@ -93,61 +93,97 @@ def try_with_browser(url: str, verbose: bool = False, headless: bool = True) -> 
             pass
 
 
+def try_with_unlocker(url: str, verbose: bool = False) -> Dict[str, Any]:
+    """Usa Bright Data Web Unlocker API per bypassare Akamai su TicketOne."""
+    import requests as _req
+    import os
+
+    api_key = os.environ.get("BRIGHTDATA_API_KEY", "be81f746-fc93-4632-b4ae-5a86d7f39698")
+    zone = os.environ.get("BRIGHTDATA_ZONE", "web_unlocker1")
+
+    if verbose:
+        print(f"[UNLOCKER] Requesting via Bright Data Web Unlocker: {url}")
+
+    response = _req.post(
+        "https://api.brightdata.com/request",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        json={"zone": zone, "url": url, "format": "raw"},
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"Unlocker HTTP {response.status_code}")
+
+    html = response.text
+    if verbose:
+        print(f"[UNLOCKER] Got {len(html)} bytes")
+
+    seed_item = build_seed_item(url)
+    detailed_item = parse_event_detail(html, seed_item)
+    return build_result(url, detailed_item, source_used="unlocker")
+
+
 def get_ticketone_price_data(
     url: str,
     verbose: bool = False,
     use_browser_fallback: bool = True,
     browser_headless: bool = True,
+    use_unlocker: bool = True,
 ) -> Dict[str, Any]:
     """
     Strategia robusta:
-    - prova HTTP
-    - se fallisce o non trova prezzo utile, prova browser
+    1. prova HTTP diretto
+    2. se fallisce (403 Akamai) -> prova Bright Data Web Unlocker
+    3. se fallisce -> prova browser (xvfb)
     """
     try:
         result = try_with_http(url, verbose=verbose)
-
-        # Se HTTP ha trovato davvero un prezzo, va bene così
         if result.get("min_price") is not None:
             return result
-
-        # Se HTTP non fallisce ma non produce dato utile,
-        # valutiamo il fallback browser
-        if not use_browser_fallback:
+        if not use_browser_fallback and not use_unlocker:
             return result
-
         if verbose:
-            print(f"[PRICE FALLBACK] HTTP non sufficiente, provo browser url={url}")
-
+            print(f"[PRICE FALLBACK] HTTP non sufficiente, provo unlocker url={url}")
     except Exception as exc:
         if verbose:
             print(f"[PRICE HTTP ERROR] url={url} error={exc}")
-
-        if not use_browser_fallback:
+        if not use_browser_fallback and not use_unlocker:
             return {
-                "event_url": url,
-                "title": None,
-                "raw_price_text": None,
-                "min_price": None,
-                "currency": None,
-                "detail_status": "fetch_error",
-                "source_used": "http",
-                "error": str(exc),
+                "event_url": url, "title": None, "raw_price_text": None,
+                "min_price": None, "currency": None,
+                "detail_status": "fetch_error", "source_used": "http", "error": str(exc),
             }
+
+    if use_unlocker:
+        try:
+            result = try_with_unlocker(url, verbose=verbose)
+            if result.get("min_price") is not None or result.get("raw_price_text"):
+                return result
+            if verbose:
+                print(f"[UNLOCKER FALLBACK] Unlocker non ha trovato prezzo url={url}")
+        except Exception as exc:
+            if verbose:
+                print(f"[UNLOCKER ERROR] url={url} error={exc}")
+
+    if not use_browser_fallback:
+        return {
+            "event_url": url, "title": None, "raw_price_text": None,
+            "min_price": None, "currency": None,
+            "detail_status": "fetch_error", "source_used": "unlocker",
+        }
 
     try:
         return try_with_browser(url, verbose=verbose, headless=browser_headless)
     except Exception as exc:
         if verbose:
             print(f"[PRICE BROWSER ERROR] url={url} error={exc}")
-
         return {
-            "event_url": url,
-            "title": None,
-            "raw_price_text": None,
-            "min_price": None,
-            "currency": None,
-            "detail_status": "browser_error",
-            "source_used": "browser",
-            "error": str(exc),
+            "event_url": url, "title": None, "raw_price_text": None,
+            "min_price": None, "currency": None,
+            "detail_status": "browser_error", "source_used": "browser", "error": str(exc),
         }
+
+

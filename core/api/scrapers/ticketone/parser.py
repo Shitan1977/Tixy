@@ -461,8 +461,38 @@ def pick_better(base: Optional[str], new: Optional[str]) -> Optional[str]:
     return base
 
 
+def _ticketone_has_instock_offer(html: str) -> bool:
+    """
+    Controlla i blocchi JSON-LD/offers nell'HTML.
+    True se esiste almeno un'offerta InStock,
+    False se esistono offerte ma sono tutte OutOfStock,
+    True se non trova nessun campo availability (nessuna info = non bloccare).
+    """
+    import re
+    avail_matches = re.findall(r'"availability"\s*:\s*"(https?://schema\.org/\w+)"', html)
+    if not avail_matches:
+        return True
+    return any("InStock" in a for a in avail_matches)
+
+
+def _ticketone_has_instock_offer(html: str) -> bool:
+    """
+    Controlla i blocchi JSON-LD/offers nell'HTML.
+    True se esiste almeno un'offerta InStock,
+    False se esistono offerte ma sono tutte OutOfStock,
+    True se non trova nessun campo availability (nessuna info = non bloccare).
+    """
+    import re
+    avail_matches = re.findall(r'"availability"\s*:\s*"(https?://schema\.org/\w+)"', html)
+    if not avail_matches:
+        return True
+    return any("InStock" in a for a in avail_matches)
+
+
 def parse_event_detail(html: str, item: TicketOneEventItem) -> TicketOneEventItem:
     soup = BeautifulSoup(html, "html.parser")
+    has_instock = _ticketone_has_instock_offer(html)
+    has_instock = _ticketone_has_instock_offer(html)
     text = soup.get_text("\n", strip=True)
 
     title = item.title
@@ -518,6 +548,13 @@ def parse_event_detail(html: str, item: TicketOneEventItem) -> TicketOneEventIte
     if not venue and fallback_venue:
         venue = fallback_venue
 
+    # Se JSON-LD indica che TUTTE le offerte sono OutOfStock,
+    # il prezzo trovato nel testo e' solo un riferimento storico/listino.
+    if not has_instock:
+        price_text = None
+
+    detail_status = "ok" if price_text else "out_of_stock"
+
     return TicketOneEventItem(
         title=title,
         event_url=item.event_url,
@@ -527,6 +564,6 @@ def parse_event_detail(html: str, item: TicketOneEventItem) -> TicketOneEventIte
         starts_at_raw=starts_at_raw,
         category_hint=item.category_hint,
         source="detail",
-        detail_status="ok",
+        detail_status=detail_status,
         price_text=price_text,
     )

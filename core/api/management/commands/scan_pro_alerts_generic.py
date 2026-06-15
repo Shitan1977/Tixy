@@ -249,17 +249,37 @@ def check_platform_availability(platform_name, url, verbose=False,
         return check_ticketone(url=url, verbose=verbose)
 
     if platform_name == "fansale":
+        from api.scrapers.fansale_checker import check_fansale_availability
+        result = check_fansale_availability(url=url, verbose=verbose)
         return {
-            "ok": True, "availability": "unknown",
-            "reason": "fansale_checker_not_ready",
-            "status_code": None, "final_url": url,
+            "ok": result.get("ok", False),
+            "availability": result.get("availability", "unknown"),
+            "reason": result.get("reason", "fansale_unknown"),
+            "status_code": None,
+            "final_url": result.get("url", url),
+            "min_price": result.get("min_price"),
         }
 
     if platform_name == "vivaticket":
-        # vivaticket ha scanner dedicato — qui non dovrebbe arrivare
+        from api.models import PerformancePiattaforma
+        pp = PerformancePiattaforma.objects.filter(url=url, piattaforma__nome__iexact="vivaticket").first()
+        if not pp:
+            return {
+                "ok": True, "availability": "unknown",
+                "reason": "vivaticket_pp_not_found",
+                "status_code": None, "final_url": url,
+            }
+        snap = pp.snapshot_raw or {}
+        sale_status = snap.get("sale_status")
+        if sale_status in ("available", "available_or_special"):
+            availability = "available"
+        elif sale_status in ("sold_out", "inactive_sell_button", "no_sell_button"):
+            availability = "unavailable"
+        else:
+            availability = "unknown"
         return {
-            "ok": True, "availability": "unknown",
-            "reason": "vivaticket_use_dedicated_scanner",
+            "ok": True, "availability": availability,
+            "reason": f"vivaticket_snapshot:{sale_status}",
             "status_code": None, "final_url": url,
         }
 
