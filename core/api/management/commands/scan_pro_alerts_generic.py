@@ -30,7 +30,7 @@ from django.utils import timezone
 # Piattaforme non ancora supportate dallo scanner generico.
 # vivaticket è RIMOSSO: ha uno scanner dedicato (scan_vivaticket_pro).
 # fansale resta non supportato fino a implementazione checker.
-_NOT_READY_PLATFORMS = {"fansale"}
+_NOT_READY_PLATFORMS = set()  # fansale ora gestito da fansale_checker (Bright Data CDP)
 
 # Anti rate-limit: skip mapping scansionato nelle ultime N ore
 SKIP_IF_SCANNED_WITHIN_HOURS: int = 4
