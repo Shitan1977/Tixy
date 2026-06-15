@@ -14,8 +14,9 @@ BRIGHTDATA_WS = os.environ.get(
 )
 
 AVAILABLE_SIGNALS = [
-    "carica offerte",
-    "per caricare tutte le offerte",
+    # RIMOSSI: "carica offerte" e "per caricare tutte le offerte"
+    # sono testi statici del bottone, presenti anche senza biglietti disponibili.
+    # Solo segnali che appaiono dopo il caricamento dinamico delle offerte reali:
     "prezzo fisso",
     "acquista ora",
     "aggiungi al carrello",
