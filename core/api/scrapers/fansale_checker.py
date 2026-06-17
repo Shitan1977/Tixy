@@ -57,6 +57,20 @@ async def _check_async(url: str, verbose: bool = False) -> Dict[str, Any]:
                 # Retry dopo eventuale navigazione
                 await page.wait_for_timeout(5000)
                 text = await page.evaluate("document.body.innerText")
+
+            # Retry se Akamai ha bloccato la richiesta (Access Denied intermittente)
+            if "access denied" in text.lower() and "you don't have permission" in text.lower():
+                if verbose:
+                    print("[FANSALE] Access Denied rilevato, retry dopo 8s...")
+                await page.wait_for_timeout(8000)
+                await page.reload(wait_until="domcontentloaded", timeout=90000)
+                await page.wait_for_timeout(8000)
+                try:
+                    text = await page.evaluate("document.body.innerText")
+                except Exception:
+                    await page.wait_for_timeout(5000)
+                    text = await page.evaluate("document.body.innerText")
+
             text_lower = text.lower()
 
             if verbose:
