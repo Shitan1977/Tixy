@@ -532,8 +532,11 @@ class Command(BaseCommand):
                 "evento",
             )
             .filter(abbonamento__attivo=True)
-            .filter(abbonamento__plan__plan_type="PRO")
             .filter(abbonamento__prezzo__gt=0)
+            # NOTA: rimosso filtro plan__plan_type="PRO" — il campo plan
+            # risulta NULL per il 64% degli abbonamenti attivi paganti
+            # (bug strutturale di lunga data nel processo di creazione).
+            # prezzo__gt=0 è il proxy affidabile per "abbonamento PRO pagante".
             .filter(
                 Q(abbonamento__data_fine__isnull=True) |
                 Q(abbonamento__data_fine__gte=now)
@@ -658,6 +661,7 @@ class Command(BaseCommand):
                     PerformancePiattaforma.objects
                     .select_related("piattaforma")
                     .filter(performance=eq_perf, piattaforma__attivo=True)
+                    .exclude(snapshot_raw__status="invalid_url_no_id")
                 )
                 for link in perf_links:
                     add_platform_link(f"performance:{eq_perf.id}", link)
