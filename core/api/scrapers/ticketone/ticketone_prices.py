@@ -93,33 +93,68 @@ def try_with_browser(url: str, verbose: bool = False, headless: bool = True) -> 
             pass
 
 
+# Numero di tentativi e soglia minima byte per considerare valida la risposta Unlocker.
+# Chiamate ravvicinate su Bright Data possono restituire 0 byte (rate-limit
+# temporaneo): in quel caso ritentiamo con backoff invece di arrenderci, dato
+# che una singola chiamata pulita funziona regolarmente.
+MAX_UNLOCKER_RETRIES = 3
+UNLOCKER_MIN_VALID_BYTES = 1000
+UNLOCKER_RETRY_BASE_WAIT = 4.0
+
+
 def try_with_unlocker(url: str, verbose: bool = False) -> Dict[str, Any]:
-    """Usa Bright Data Web Unlocker API per bypassare Akamai su TicketOne."""
+    """Usa Bright Data Web Unlocker API per bypassare Akamai su TicketOne.
+
+    Ritenta con backoff se la risposta e' vuota o troppo corta (sintomo di
+    rate-limit Bright Data su chiamate ravvicinate).
+    """
     import requests as _req
     import os
-
+    import time as _time
     api_key = os.environ.get("BRIGHTDATA_API_KEY", "be81f746-fc93-4632-b4ae-5a86d7f39698")
     zone = os.environ.get("BRIGHTDATA_ZONE", "web_unlocker1")
 
-    if verbose:
-        print(f"[UNLOCKER] Requesting via Bright Data Web Unlocker: {url}")
+    html = ""
+    for attempt in range(1, MAX_UNLOCKER_RETRIES + 1):
+        if verbose:
+            print(f"[UNLOCKER] Requesting (attempt {attempt}/{MAX_UNLOCKER_RETRIES}): {url}")
+        try:
+            response = _req.post(
+                "https://api.brightdata.com/request",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                json={"zone": zone, "url": url, "format": "raw"},
+                timeout=60,
+            )
+        except Exception as exc:
+            if verbose:
+                print(f"[UNLOCKER] request error attempt {attempt}: {exc}")
+            if attempt < MAX_UNLOCKER_RETRIES:
+                _time.sleep(UNLOCKER_RETRY_BASE_WAIT * attempt)
+                continue
+            raise
 
-    response = _req.post(
-        "https://api.brightdata.com/request",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        json={"zone": zone, "url": url, "format": "raw"},
-        timeout=60,
-    )
+        if response.status_code != 200:
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < MAX_UNLOCKER_RETRIES:
+                if verbose:
+                    print(f"[UNLOCKER] HTTP {response.status_code}, retry dopo backoff")
+                _time.sleep(UNLOCKER_RETRY_BASE_WAIT * attempt)
+                continue
+            raise Exception(f"Unlocker HTTP {response.status_code}")
 
-    if response.status_code != 200:
-        raise Exception(f"Unlocker HTTP {response.status_code}")
+        html = response.text or ""
+        if verbose:
+            print(f"[UNLOCKER] Got {len(html)} bytes (attempt {attempt})")
 
-    html = response.text
-    if verbose:
-        print(f"[UNLOCKER] Got {len(html)} bytes")
+        if len(html) >= UNLOCKER_MIN_VALID_BYTES:
+            break
+
+        if attempt < MAX_UNLOCKER_RETRIES:
+            if verbose:
+                print(f"[UNLOCKER] Risposta corta ({len(html)} byte), retry dopo backoff")
+            _time.sleep(UNLOCKER_RETRY_BASE_WAIT * attempt)
 
     seed_item = build_seed_item(url)
     detailed_item = parse_event_detail(html, seed_item)

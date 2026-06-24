@@ -162,6 +162,48 @@ ALERT_PLATFORM = "vivaticket"
 
 # ── Logica rilevamento stato ──────────────────────────────────────────────────
 
+# ── Derivazione automatica campi shop dai button ──────────────────────────────
+import re as _re_vt
+
+
+def derive_shop_fields(snapshot):
+    """Deriva shop_type/pcode/tcode/is_sell_active dai button se mancanti."""
+    snap = dict(snapshot or {})
+
+    if "is_sell_active" not in snap:
+        sell_active = snap.get("sell_active")
+        if sell_active is True:
+            snap["is_sell_active"] = True
+        elif sell_active is False:
+            snap["is_sell_active"] = False
+
+    need_shop = (
+        snap.get("shop_type") != "vivaticket_shop"
+        or not snap.get("pcode")
+        or not snap.get("tcode")
+    )
+    if need_shop:
+        buttons = snap.get("buttons", []) or []
+        sell_btn = None
+        for b in buttons:
+            u = b.get("url", "") or ""
+            if b.get("type") == "sell" and "shop.vivaticket.com" in u:
+                sell_btn = b
+                break
+        if sell_btn:
+            sell_url = sell_btn["url"].replace("&amp;", "&")
+            m_pcode = _re_vt.search(r"pcode=(\d+)", sell_url)
+            m_tcode = _re_vt.search(r"tcode=([A-Za-z0-9]+)", sell_url)
+            if m_pcode and m_tcode:
+                snap["shop_type"] = "vivaticket_shop"
+                snap["pcode"] = m_pcode.group(1)
+                snap["tcode"] = m_tcode.group(1)
+                if "is_sell_active" not in snap and sell_btn.get("active") is True:
+                    snap["is_sell_active"] = True
+
+    return snap
+
+
 def detect_status_from_snapshot(snapshot: dict, performance=None) -> tuple[str, str]:
     """
     Determina lo stato di disponibilità di un evento Vivaticket
@@ -781,6 +823,12 @@ class Command(BaseCommand):
                 break
 
             snapshot  = pp.snapshot_raw or {}
+            derived = derive_shop_fields(snapshot)
+            if derived != snapshot:
+                snapshot = derived
+                if not dry_run:
+                    pp.snapshot_raw = snapshot
+                    pp.save(update_fields=["snapshot_raw"])
             shop_type = snapshot.get("shop_type")
             pcode     = snapshot.get("pcode")
             tcode     = snapshot.get("tcode")

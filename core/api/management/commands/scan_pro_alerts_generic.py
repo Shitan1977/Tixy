@@ -237,10 +237,15 @@ def find_equivalent_performances(performance):
 # =============================================================================
 
 def check_platform_availability(platform_name, url, verbose=False,
-                                 skip_scan_hours=SKIP_IF_SCANNED_WITHIN_HOURS):
+                                 skip_scan_hours=SKIP_IF_SCANNED_WITHIN_HOURS,
+                                 mapping_pk=None, mapping_type=None):
     """
     Dispatcher generico per piattaforma.
     Ritorna sempre un dict con: ok, availability, reason, status_code, final_url.
+
+    mapping_pk/mapping_type: usati da Vivaticket per cercare il
+    PerformancePiattaforma per ID diretto invece che per URL (fix bug
+    66% mismatch URL pagina pubblica vs URL shop interno salvato).
     """
     if platform_name == "ticketmaster":
         return check_ticketmaster(url=url, verbose=verbose)
@@ -262,7 +267,31 @@ def check_platform_availability(platform_name, url, verbose=False,
 
     if platform_name == "vivaticket":
         from api.models import PerformancePiattaforma
-        pp = PerformancePiattaforma.objects.filter(url=url, piattaforma__nome__iexact="vivaticket").first()
+        pp = None
+        # Caso preferito: mapping_pk punta direttamente al PerformancePiattaforma
+        if mapping_type == "performance" and mapping_pk:
+            pp = PerformancePiattaforma.objects.filter(
+                pk=mapping_pk, piattaforma__nome__iexact="vivaticket"
+            ).first()
+        # Fallback: link arrivato da EventoPiattaforma (evento:XXX) — cerca
+        # il PerformancePiattaforma Vivaticket collegato alla stessa performance
+        # tramite l'evento, invece di confrontare stringhe URL diverse
+        # (pagina pubblica vivaticket.com vs shop.vivaticket.com).
+        if not pp and mapping_type == "evento" and mapping_pk:
+            from api.models import EventoPiattaforma
+            ep = EventoPiattaforma.objects.filter(pk=mapping_pk).select_related("evento").first()
+            if ep and ep.evento_id:
+                pp = (
+                    PerformancePiattaforma.objects
+                    .filter(
+                        performance__evento_id=ep.evento_id,
+                        piattaforma__nome__iexact="vivaticket",
+                    )
+                    .first()
+                )
+        # Ultimo fallback: ricerca per URL esatto (comportamento storico)
+        if not pp:
+            pp = PerformancePiattaforma.objects.filter(url=url, piattaforma__nome__iexact="vivaticket").first()
         if not pp:
             return {
                 "ok": True, "availability": "unknown",
@@ -271,16 +300,39 @@ def check_platform_availability(platform_name, url, verbose=False,
             }
         snap = pp.snapshot_raw or {}
         sale_status = snap.get("sale_status")
+        # resale_link e' il segnale AFFIDABILE: link diretto alla pagina
+        # rivendita Vivaticket, valorizzato solo se ci sono davvero biglietti
+        # in rivendita (vuoto = nessuna rivendita reale). Preferito al vecchio
+        # flag resale_active che indicava solo "sezione esiste".
+        resale_link = (snap.get("resale_link") or "").strip()
+        has_real_resale = bool(resale_link)
+
+        final_url = url
+        is_resale_alert = False
+
         if sale_status in ("available", "available_or_special"):
             availability = "available"
+            reason = f"vivaticket_snapshot:{sale_status}"
         elif sale_status in ("sold_out", "inactive_sell_button", "no_sell_button"):
-            availability = "unavailable"
+            # Vendita primaria chiusa: alert SOLO se c'e' rivendita reale
+            # (resale_link valorizzato). Il link email punta direttamente li'.
+            if has_real_resale:
+                availability = "available"
+                reason = f"vivaticket_resale_only:{sale_status}"
+                final_url = resale_link
+                is_resale_alert = True
+            else:
+                availability = "unavailable"
+                reason = f"vivaticket_snapshot:{sale_status}"
         else:
             availability = "unknown"
+            reason = f"vivaticket_snapshot:{sale_status}"
+
         return {
             "ok": True, "availability": availability,
-            "reason": f"vivaticket_snapshot:{sale_status}",
-            "status_code": None, "final_url": url,
+            "reason": reason,
+            "status_code": None, "final_url": final_url,
+            "is_resale": is_resale_alert,
         }
 
     return {
@@ -435,7 +487,11 @@ def build_generic_email_message(*, user, monitoraggio, performance, evento,
             data_evento = performance.starts_at_utc.strftime("%d/%m/%Y %H:%M")
 
     platform_label = platform_name.upper()
-    subject = f"[Tixy] Biglietti disponibili su {platform_label} - {event_name}"
+    is_resale = bool(result.get("is_resale"))
+    if is_resale:
+        subject = f"[Tixy] Biglietti disponibili in RIVENDITA su {platform_label} - {event_name}"
+    else:
+        subject = f"[Tixy] Biglietti disponibili su {platform_label} - {event_name}"
 
     min_price = result.get("min_price")
     currency = result.get("currency") or "EUR"
@@ -445,11 +501,16 @@ def build_generic_email_message(*, user, monitoraggio, performance, evento,
 
     message = (
         f"Ciao {getattr(user, 'first_name', '') or ''},\n\n"
-        f"abbiamo trovato una disponibilità per il tuo monitoraggio PRO.\n\n"
-        f"Evento: {event_name}\n"
+        + (
+            "abbiamo trovato biglietti in RIVENDITA per il tuo monitoraggio PRO.\n\n"
+            if is_resale else
+            "abbiamo trovato una disponibilità per il tuo monitoraggio PRO.\n\n"
+        )
+        + f"Evento: {event_name}\n"
         f"Luogo: {luogo}\n"
         f"Data: {data_evento}\n"
-        f"Piattaforma: {platform_label}\n\n"
+        f"Piattaforma: {platform_label}\n"
+        + ("Tipo: RIVENDITA (resale)\n\n" if is_resale else "\n")
     )
 
     if price:
@@ -738,6 +799,8 @@ class Command(BaseCommand):
                     platform_name=platform_name,
                     url=url,
                     verbose=verbose,
+                    mapping_pk=mapping_pk,
+                    mapping_type=mapping_type,
                 )
 
                 # Aggiorna ultima_scansione
@@ -796,10 +859,12 @@ class Command(BaseCommand):
                             time.sleep(sleep_seconds)
                         continue
 
+                    # Usa final_url se presente (es. link diretto rivendita Vivaticket)
+                    email_url = result.get("final_url") or url
                     subject, message = build_generic_email_message(
                         user=utente, monitoraggio=monitoraggio,
                         performance=performance, evento=evento,
-                        platform_name=platform_name, url=url, result=result,
+                        platform_name=platform_name, url=email_url, result=result,
                     )
 
                     if dry_run:

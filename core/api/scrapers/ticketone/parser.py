@@ -463,26 +463,40 @@ def pick_better(base: Optional[str], new: Optional[str]) -> Optional[str]:
 
 def _ticketone_has_instock_offer(html: str) -> bool:
     """
-    Controlla i blocchi JSON-LD/offers nell'HTML.
-    True se esiste almeno un'offerta InStock,
-    False se esistono offerte ma sono tutte OutOfStock,
-    True se non trova nessun campo availability (nessuna info = non bloccare).
+    Determina se l'evento ha biglietti realmente acquistabili.
+
+    PRIORITA' 1 (datalayer TicketOne, il piu' affidabile):
+      - event_ticket_price vuoto  -> sold out (come Ultimo Tor Vergata)
+      - event_series_availability [0] -> sold out
+      Questi campi sono accurati anche quando il listino prezzi HTML
+      (ticket-type-price) mostra ancora un prezzo "da" residuo.
+      Risolve falsi positivi tipo Sting / Pitbull.
+
+    PRIORITA' 2 (JSON-LD offers): se i campi datalayer non ci sono,
+      usa availability schema.org. InStock -> True, tutte OutOfStock -> False.
+
+    DEFAULT: se nessun segnale, True (non bloccare).
     """
     import re
-    avail_matches = re.findall(r'"availability"\s*:\s*"(https?://schema\.org/\w+)"', html)
-    if not avail_matches:
-        return True
-    return any("InStock" in a for a in avail_matches)
 
+    # --- PRIORITA' 1: datalayer ---
+    m_price = re.search(r'event_ticket_price"\s*:\s*"?([^",}\]]*)', html)
+    m_avail = re.search(r'event_series_availability"\s*:\s*"?\[?\s*([^",}\]]*)', html)
 
-def _ticketone_has_instock_offer(html: str) -> bool:
-    """
-    Controlla i blocchi JSON-LD/offers nell'HTML.
-    True se esiste almeno un'offerta InStock,
-    False se esistono offerte ma sono tutte OutOfStock,
-    True se non trova nessun campo availability (nessuna info = non bloccare).
-    """
-    import re
+    price_field_present = m_price is not None
+    avail_field_present = m_avail is not None
+
+    if price_field_present or avail_field_present:
+        price_empty = price_field_present and (m_price.group(1).strip() == "")
+        avail_zero = avail_field_present and (m_avail.group(1).strip() in ("0", ""))
+        # Se il datalayer dice esplicitamente sold-out -> False
+        if price_empty or avail_zero:
+            return False
+        # Se il datalayer ha un prezzo valorizzato -> InStock
+        if price_field_present and m_price.group(1).strip() != "":
+            return True
+
+    # --- PRIORITA' 2: JSON-LD ---
     avail_matches = re.findall(r'"availability"\s*:\s*"(https?://schema\.org/\w+)"', html)
     if not avail_matches:
         return True
@@ -491,7 +505,6 @@ def _ticketone_has_instock_offer(html: str) -> bool:
 
 def parse_event_detail(html: str, item: TicketOneEventItem) -> TicketOneEventItem:
     soup = BeautifulSoup(html, "html.parser")
-    has_instock = _ticketone_has_instock_offer(html)
     has_instock = _ticketone_has_instock_offer(html)
     text = soup.get_text("\n", strip=True)
 

@@ -218,6 +218,9 @@ def normalize_vivaticket_event_api(data: dict, source_url: str | None = None) ->
     info_performance = data.get("infoPerformance") or {}
 
     event_detail = info_event.get("eventDetail") or {}
+    # resaleLink: link diretto alla rivendita. Vuoto = nessuna rivendita reale.
+    # Segnale affidabile (a differenza del solo flag resale_active).
+    resale_link = (event_detail.get("resaleLink") or "").strip()
     venue_detail = info_event.get("venueDetail") or {}
     location_detail = info_event.get("locationDetail") or {}
     organizer_detail = info_event.get("organizerDetail") or {}
@@ -321,6 +324,8 @@ def normalize_vivaticket_event_api(data: dict, source_url: str | None = None) ->
 
         "is_sell_active": is_sell_active,
         "sale_status": sale_status,
+        "resale_link": resale_link,
+        "resale_active": bool(resale_link),
 
         "shop_url": shop_url,
         "shop_type": shop_type,
