@@ -484,7 +484,12 @@ def build_generic_email_message(*, user, monitoraggio, performance, evento,
         if performance.luogo:
             luogo = performance.luogo.nome
         if performance.starts_at_utc:
-            data_evento = performance.starts_at_utc.strftime("%d/%m/%Y %H:%M")
+            # Converte da UTC a ora italiana (Europe/Rome) per l'email,
+            # altrimenti l'orario mostrato sarebbe l'UTC (es. 18:30 invece di 20:30).
+            import pytz as _pytz
+            _rome = _pytz.timezone("Europe/Rome")
+            _local_dt = performance.starts_at_utc.astimezone(_rome)
+            data_evento = _local_dt.strftime("%d/%m/%Y %H:%M")
 
     platform_label = platform_name.upper()
     is_resale = bool(result.get("is_resale"))
@@ -640,6 +645,12 @@ class Command(BaseCommand):
         skipped_rate_limit = 0
         email_fail_count = 0
 
+        # FIX rate-limit multi-utente: cache dei risultati per mapping nello
+        # stesso giro. Evita di ri-scansionare la stessa performance (rispetta
+        # il rate-limit) MA permette di valutare l'invio anche ad altri utenti
+        # che monitorano la stessa performance (prima venivano saltati).
+        scan_result_cache = {}
+
         for monitoraggio in monitoraggi:
             processed += 1
 
@@ -715,6 +726,12 @@ class Command(BaseCommand):
             if evento:
                 equivalent_event_ids.add(evento.id)
 
+            # Raccoglie prima i link a livello PERFORMANCE (piu' specifici).
+            # Tiene traccia di quali piattaforme sono gia' coperte da un link
+            # performance, per non aggiungere poi il link a livello EVENTO della
+            # stessa piattaforma (che e' generico e puo' puntare a una data
+            # diversa, es. un altro concerto dello stesso artista).
+            platforms_with_perf_link = set()
             for eq_perf in equivalent_performances:
                 if eq_perf.evento_id:
                     equivalent_event_ids.add(eq_perf.evento_id)
@@ -725,6 +742,9 @@ class Command(BaseCommand):
                     .exclude(snapshot_raw__status="invalid_url_no_id")
                 )
                 for link in perf_links:
+                    pname = normalize_platform_name(link.piattaforma.nome)
+                    if get_link_url(link):
+                        platforms_with_perf_link.add(pname)
                     add_platform_link(f"performance:{eq_perf.id}", link)
 
             if equivalent_event_ids:
@@ -734,6 +754,11 @@ class Command(BaseCommand):
                     .filter(evento_id__in=equivalent_event_ids, piattaforma__attivo=True)
                 )
                 for link in event_links:
+                    pname = normalize_platform_name(link.piattaforma.nome)
+                    # Salta il link evento se la performance ha gia' un link
+                    # per questa piattaforma (il performance e' piu' affidabile).
+                    if pname in platforms_with_perf_link:
+                        continue
                     add_platform_link(f"evento:{link.evento_id}", link)
 
             if not platform_links:
@@ -781,30 +806,48 @@ class Command(BaseCommand):
                         time.sleep(sleep_seconds)
                     continue
 
-                # PATCH 7: anti rate-limit
+                # PATCH 7: anti rate-limit (con riuso cache per multi-utente)
+                cache_key = (mapping_type, mapping_pk)
                 if skip_scan_hours > 0 and _was_scanned_recently(mapping_type, mapping_pk, skip_scan_hours):
-                    skipped_rate_limit += 1
+                    # Se in questo stesso giro abbiamo gia' un risultato per
+                    # questa performance, lo riusiamo (niente nuova chiamata
+                    # HTTP) ma proseguiamo a valutare l'invio per QUESTO utente.
+                    # Cosi' piu' utenti sulla stessa performance ricevono tutti.
+                    if cache_key in scan_result_cache:
+                        result = scan_result_cache[cache_key]
+                        if verbose:
+                            self.stdout.write(
+                                f"[CACHE HIT] platform={platform_name} monitoraggio={monitoraggio.id}: "
+                                f"riuso risultato del giro corrente"
+                            )
+                    else:
+                        # Nessun risultato in cache: davvero gia' scansionato in
+                        # un giro precedente -> salta (comportamento originale).
+                        skipped_rate_limit += 1
+                        if verbose:
+                            self.stdout.write(
+                                f"[SKIP RATE] platform={platform_name} monitoraggio={monitoraggio.id}: "
+                                f"già scansionato nelle ultime {skip_scan_hours}h"
+                            )
+                        continue
+                else:
                     if verbose:
-                        self.stdout.write(
-                            f"[SKIP RATE] platform={platform_name} monitoraggio={monitoraggio.id}: "
-                            f"già scansionato nelle ultime {skip_scan_hours}h"
-                        )
-                    continue
+                        self.stdout.write(f"[LINK] source={source} platform={platform_name} url={url}")
 
-                if verbose:
-                    self.stdout.write(f"[LINK] source={source} platform={platform_name} url={url}")
+                    # Chiama il checker
+                    result = check_platform_availability(
+                        platform_name=platform_name,
+                        url=url,
+                        verbose=verbose,
+                        mapping_pk=mapping_pk,
+                        mapping_type=mapping_type,
+                    )
 
-                # Chiama il checker
-                result = check_platform_availability(
-                    platform_name=platform_name,
-                    url=url,
-                    verbose=verbose,
-                    mapping_pk=mapping_pk,
-                    mapping_type=mapping_type,
-                )
+                    # Aggiorna ultima_scansione
+                    _touch_last_scan(mapping_type, mapping_pk)
 
-                # Aggiorna ultima_scansione
-                _touch_last_scan(mapping_type, mapping_pk)
+                    # Salva in cache per altri utenti sulla stessa performance
+                    scan_result_cache[cache_key] = result
 
                 # Force available (solo test)
                 if force_available_platform and platform_name == force_available_platform:
