@@ -3,7 +3,8 @@ from uuid import uuid4
 from datetime import datetime, timedelta
 
 from django.contrib.auth import get_user_model
-from django.core.exceptions import FieldError, ValidationError
+from django.core.exceptions import FieldError
+from rest_framework.exceptions import ValidationError
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.db.models import Q, Count, Avg, Min
@@ -52,6 +53,7 @@ from .models import (
 )
 
 User = get_user_model()
+
 
 def _parse_int_or_none(value):
     try:
@@ -102,11 +104,17 @@ def _build_dynamic_daily_pro_option(event_id: int | None = None, performance_id:
     if not start_dt:
         return None
 
-    today = dj_timezone.now().date()
-    event_day = start_dt.date()
-    giorni = (event_day - today).days
-    if giorni <= 0:
-        return None
+    now = dj_timezone.now()
+    if start_dt <= now:
+        return None  # evento gia' iniziato/passato: giornaliero non applicabile
+
+    # Giorni calcolati in ora italiana (non UTC): un evento 'stasera' in Italia
+    # puo' risultare ancora 'oggi' in UTC e dare 0 giorni pur non essendo iniziato.
+    import pytz as _pytz
+    _rome = _pytz.timezone("Europe/Rome")
+    today_rome = dj_timezone.localtime(now, _rome).date()
+    event_day_rome = dj_timezone.localtime(start_dt, _rome).date()
+    giorni = max(1, (event_day_rome - today_rome).days)
 
     daily_rate = Decimal(str(db_plan.price))
     prezzo = (daily_rate * Decimal(giorni)).quantize(Decimal("0.01"))
@@ -121,7 +129,8 @@ def _build_dynamic_daily_pro_option(event_id: int | None = None, performance_id:
         "periodo": "evento_daily",
         "daily_rate": str(daily_rate_fmt),
         "event_date": start_dt,
-        "event_date_fmt": dj_timezone.localtime(start_dt).strftime("%d/%m/%Y %H:%M") if dj_timezone.is_aware(start_dt) else start_dt.strftime("%d/%m/%Y %H:%M"),
+        "event_date_fmt": dj_timezone.localtime(start_dt).strftime("%d/%m/%Y %H:%M") if dj_timezone.is_aware(
+            start_dt) else start_dt.strftime("%d/%m/%Y %H:%M"),
         "description": f"{daily_rate_fmt} {db_plan.currency} al giorno fino al giorno prima dell'evento.",
     }
 
@@ -799,9 +808,9 @@ class EventFollowViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         """Override per gestire meglio l'errore di unicità."""
         import logging
         logger = logging.getLogger(__name__)
-        
+
         logger.info(f"EventFollow create - User: {request.user.id}, Data: {request.data}")
-        
+
         try:
             response = super().create(request, *args, **kwargs)
             logger.info(f"EventFollow created successfully: {response.data}")
@@ -989,24 +998,25 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
         listing = self.get_object()
         if not (request.user.is_staff or listing.seller_id == request.user.id):
             return Response({"detail": "not allowed"}, status=403)
-        
+
         if listing.status == "CANCELLED":
             return Response({"detail": "listing gia annullato"}, status=status.HTTP_400_BAD_REQUEST)
-        
+
         if listing.status == "SOLD":
-            return Response({"detail": "non puoi annullare un listing completamente venduto"}, status=status.HTTP_400_BAD_REQUEST)
-        
+            return Response({"detail": "non puoi annullare un listing completamente venduto"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
         from django.db import transaction
         with transaction.atomic():
             # Marca il listing come CANCELLED
             listing.status = "CANCELLED"
             listing.save(update_fields=["status"])
-            
+
             # Libera i sub-ticket non ancora venduti
             for sub in listing.subitems.filter(subitem__is_sold=False):
                 sub.subitem.is_listed = False
                 sub.subitem.save(update_fields=["is_listed"])
-        
+
         return Response({
             "listing_id": listing.id,
             "status": listing.status,
@@ -1566,6 +1576,7 @@ class MyPurchasesView(generics.ListAPIView):
     """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = MyPurchasesItemSerializer
+
     def get_queryset(self):
         # Precarichiamo tutto ciò che serve alla UI
         qs = (
@@ -1718,16 +1729,17 @@ class MyResalesView(generics.ListAPIView):
             .order_by("-created_at", "-id")
         )
 
+
 # =========================
 # ASSISTENZA (Ticket, Messaggi, Allegati)
 # =========================
-
 
 
 class IsOwnerOrStaff(permissions.BasePermission):
     """
     Consente sempre allo staff; per gli utenti normali consente solo sui propri ticket/messaggi.
     """
+
     def has_object_permission(self, request, view, obj):
         user = request.user
         if not user or not user.is_authenticated:
@@ -1741,13 +1753,16 @@ class IsOwnerOrStaff(permissions.BasePermission):
         if isinstance(obj, SupportMessage):
             return getattr(obj.ticket, "user_id", None) == user.id or getattr(obj, "author_id", None) == user.id
         if isinstance(obj, SupportAttachment):
-            return getattr(obj.message.ticket, "user_id", None) == user.id or getattr(obj.message, "author_id", None) == user.id
+            return getattr(obj.message.ticket, "user_id", None) == user.id or getattr(obj.message, "author_id",
+                                                                                      None) == user.id
         return False
+
 
 class SupportAttachmentSerializer(ModelSerializer):
     class Meta:
         model = SupportAttachment
         fields = ["id", "file", "uploaded_at", "original_name"]
+
 
 class SupportMessageSerializer(ModelSerializer):
     attachments = SupportAttachmentSerializer(many=True, read_only=True)
@@ -1756,6 +1771,7 @@ class SupportMessageSerializer(ModelSerializer):
         model = SupportMessage
         fields = ["id", "author", "body", "created_at", "is_internal", "attachments"]
         read_only_fields = ["author", "created_at", "attachments"]
+
 
 class SupportTicketSerializer(ModelSerializer):
     messages = SupportMessageSerializer(many=True, read_only=True)
@@ -1777,10 +1793,10 @@ class SupportTicketSerializer(ModelSerializer):
         # Rimuovi user dai validated_data perché viene passato da perform_create
         validated_data.pop("user", None)
         user = self.context["request"].user
-        
+
         # Crea il ticket
         ticket = SupportTicket.objects.create(user=user, **validated_data)
-        
+
         # Crea il primo messaggio se fornito
         if message_text:
             SupportMessage.objects.create(
@@ -1789,8 +1805,9 @@ class SupportTicketSerializer(ModelSerializer):
                 body=message_text,
                 is_internal=False
             )
-        
+
         return ticket
+
 
 class SupportTicketViewSet(viewsets.ModelViewSet):
     """
@@ -1891,3 +1908,112 @@ class SupportAttachmentUploadView(APIView):
             return Response(out, status=201)
 
         return Response({"detail": "provide 'message' or 'ticket' field"}, status=400)
+
+
+# =========================
+# Password reset pubblico
+# =========================
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.auth.tokens import default_token_generator
+from django.core.mail import send_mail
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+
+
+class PasswordResetRequestView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        email = (request.data.get("email") or "").strip().lower()
+
+        generic_response = {
+            "detail": "Se l'email è registrata, riceverai le istruzioni per reimpostare la password."
+        }
+
+        # Risposta generica anche se manca email: evita enumerazione account
+        if not email:
+            return Response(generic_response, status=status.HTTP_200_OK)
+
+        User = get_user_model()
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+
+        if not user:
+            return Response(generic_response, status=status.HTTP_200_OK)
+
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        token = default_token_generator.make_token(user)
+
+        frontend_url = getattr(settings, "FRONTEND_URL", "https://tixy.it").rstrip("/")
+        reset_url = f"{frontend_url}/password/reset/confirm/?uid={uid}&token={token}"
+
+        subject = "Reimposta la tua password Tixy"
+        message = (
+            "Ciao,\n\n"
+            "abbiamo ricevuto una richiesta per reimpostare la password del tuo account Tixy.\n\n"
+            f"Clicca su questo link per scegliere una nuova password:\n{reset_url}\n\n"
+            "Se non hai richiesto tu questa operazione, puoi ignorare questa email.\n\n"
+            "Team Tixy"
+        )
+
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [user.email],
+            fail_silently=False,
+        )
+
+        return Response(generic_response, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        uid = request.data.get("uid")
+        token = request.data.get("token")
+        password = request.data.get("password") or request.data.get("new_password")
+
+        if not uid or not token or not password:
+            return Response(
+                {"detail": "Dati mancanti."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            user_id = force_str(urlsafe_base64_decode(uid))
+            User = get_user_model()
+            user = User.objects.get(pk=user_id, is_active=True)
+        except Exception:
+            return Response(
+                {"detail": "Link non valido."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not default_token_generator.check_token(user, token):
+            return Response(
+                {"detail": "Link non valido o scaduto."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(password, user=user)
+        except DjangoValidationError as exc:
+            return Response(
+                {"detail": list(exc.messages)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(password)
+        user.save(update_fields=["password"])
+
+        return Response(
+            {"detail": "Password aggiornata correttamente."},
+            status=status.HTTP_200_OK,
+        )
+
