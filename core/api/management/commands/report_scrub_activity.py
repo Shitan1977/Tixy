@@ -45,6 +45,24 @@ class Command(BaseCommand):
 
         ep_nuovi = EventoPiattaforma.objects.filter(creato_il__gte=since).count()
 
+        # copertura mapping delle performance monitorate (PRO attivi)
+        from api.models import Monitoraggio
+        mon_perf = set(Monitoraggio.objects.filter(
+            abbonamento__attivo=True, abbonamento__prezzo__gt=0,
+            performance__starts_at_utc__gte=now).values_list("performance_id", flat=True))
+        pp_ids = set(PerformancePiattaforma.objects.filter(
+            performance_id__in=mon_perf).values_list("performance_id", flat=True))
+        mon_zero = len(mon_perf - pp_ids)
+
+        # copertura mapping delle performance monitorate (PRO attivi)
+        from api.models import Monitoraggio
+        mon_perf = set(Monitoraggio.objects.filter(
+            abbonamento__attivo=True, abbonamento__prezzo__gt=0,
+            performance__starts_at_utc__gte=now).values_list("performance_id", flat=True))
+        pp_ids = set(PerformancePiattaforma.objects.filter(
+            performance_id__in=mon_perf).values_list("performance_id", flat=True))
+        mon_zero = len(mon_perf - pp_ids)
+
         notifiche_sent = Notifica.objects.filter(status="SENT", sent_at__gte=since).count()
         notifiche_failed = Notifica.objects.filter(status="FAILED", creato_il__gte=since).count() \
             if hasattr(Notifica, "creato_il") else Notifica.objects.filter(status="FAILED").count()
@@ -67,6 +85,8 @@ class Command(BaseCommand):
             righe.append("  - nessuno")
         righe += [
             "",
+            f"Perf monitorate senza mapping: {mon_zero} su {len(mon_perf)}",
+            f"Perf monitorate senza mapping: {mon_zero} su {len(mon_perf)}",
             f"Notifiche inviate (SENT):    {notifiche_sent}",
             f"Notifiche fallite (FAILED):  {notifiche_failed}",
         ]

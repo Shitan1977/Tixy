@@ -392,6 +392,42 @@ def build_generic_email_message(user, monitoraggio, performance, evento,
     return subject, message
 
 
+def build_multi_email_message(user, monitoraggio, performance, evento, availabilities):
+    # Una sola email con tutte le piattaforme disponibili in questo giro.
+    event_name = evento.nome_evento if evento else "Evento monitorato"
+    luogo = "Luogo non disponibile"
+    data_evento = "Data non disponibile"
+    if performance:
+        if performance.luogo:
+            luogo = performance.luogo.nome
+        if performance.starts_at_utc:
+            import pytz as _pytz
+            _rome = _pytz.timezone("Europe/Rome")
+            data_evento = performance.starts_at_utc.astimezone(_rome).strftime("%d/%m/%Y %H:%M")
+    labels = [a["platform_name"].upper() + (" (RIVENDITA)" if a["result"].get("is_resale") else "") for a in availabilities]
+    plats = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " e " + labels[-1]
+    subject = "[Tixy] Biglietti disponibili su %s - %s" % (plats, event_name)
+    message = "Ciao %s,\n\n" % (getattr(user, "first_name", "") or "")
+    message += "abbiamo trovato disponibilita' per il tuo monitoraggio PRO.\n\n"
+    message += "Evento: %s\nLuogo: %s\nData: %s\n\n" % (event_name, luogo, data_evento)
+    for a in availabilities:
+        r = a["result"]
+        message += "--- %s%s ---\n" % (a["platform_name"].upper(), " (RIVENDITA)" if r.get("is_resale") else "")
+        price = r.get("price")
+        min_price = r.get("min_price")
+        raw_price_text = r.get("raw_price_text")
+        currency = r.get("currency") or "EUR"
+        if price:
+            message += "Prezzo: %s\n" % price
+        elif min_price is not None:
+            message += "Prezzo: da %s %s\n" % (min_price, currency)
+        elif raw_price_text:
+            message += "Prezzo: %s\n" % raw_price_text
+        message += "Link: %s\n\n" % a["email_url"]
+    message += "Grazie,\nTixy\n"
+    return subject, message
+
+
 # ------------------------------------------------------------------- command --
 
 class Command(BaseCommand):
@@ -642,6 +678,7 @@ class Command(BaseCommand):
                                       % (performance.id, performance.starts_at_utc,
                                          performance.luogo.nome if performance.luogo else "-"))
 
+            available_this_mon = []
             platform_links = self.collect_links(monitoraggio, performance, evento)
             if not platform_links:
                 counters["skipped_no_platform"] += 1
@@ -731,17 +768,9 @@ class Command(BaseCommand):
                             time.sleep(sleep_seconds)
                         continue
                     email_url = result.get("final_url") or url
-                    subject, message = build_generic_email_message(
-                        utente, monitoraggio, performance, evento,
-                        platform_name, email_url, result)
-                    if dry_run:
-                        self.stdout.write(self.style.WARNING(
-                            "[DRY-RUN EMAIL] to=%s subject=%s dedupe=%s"
-                            % (utente.email, subject, dedupe_key)))
-                        counters["notified"] += 1
-                    else:
-                        self.notify(monitoraggio, utente, subject, message,
-                                    dedupe_key, email_retries, email_wait, counters)
+                    available_this_mon.append({
+                        "platform_name": platform_name, "dedupe_key": dedupe_key,
+                        "email_url": email_url, "result": result})
                 elif availability == "unavailable":
                     counters["unavailable"] += 1
                 else:
@@ -751,6 +780,38 @@ class Command(BaseCommand):
 
                 if sleep_seconds > 0:
                     time.sleep(sleep_seconds)
+
+            if available_this_mon:
+                subject, message = build_multi_email_message(
+                    utente, monitoraggio, performance, evento, available_this_mon)
+                plats = [a["platform_name"] for a in available_this_mon]
+                if dry_run:
+                    self.stdout.write(self.style.WARNING(
+                        "[DRY-RUN EMAIL] to=%s platforms=%s subject=%s"
+                        % (utente.email, plats, subject)))
+                    counters["notified"] += 1
+                else:
+                    # una email sola; una Notifica per piattaforma (dedupe per-piattaforma)
+                    from api.models import Notifica as _Notifica
+                    ok, err = send_email_with_retry(subject, message, utente.email,
+                                                    email_retries, email_wait)
+                    with transaction.atomic():
+                        for a in available_this_mon:
+                            _Notifica.objects.create(
+                                monitoraggio=monitoraggio, channel="email",
+                                dedupe_key=a["dedupe_key"],
+                                status="SENT" if ok else "FAILED",
+                                sent_at=timezone.now() if ok else None,
+                                message=message if ok else message + "\n\nERRORE:\n" + str(err))
+                    if ok:
+                        counters["notified"] += 1
+                        self.stdout.write(self.style.SUCCESS(
+                            "[EMAIL SENT] monitoraggio=%s to=%s platforms=%s"
+                            % (monitoraggio.id, utente.email, plats)))
+                    else:
+                        counters["email_fail"] += 1
+                        self.stdout.write(self.style.ERROR(
+                            "[EMAIL FAIL] monitoraggio=%s err=%s" % (monitoraggio.id, err)))
 
         self.stdout.write("")
         self.stdout.write(self.style.SUCCESS("[DONE]"))
