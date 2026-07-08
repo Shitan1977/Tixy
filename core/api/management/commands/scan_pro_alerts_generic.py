@@ -340,15 +340,29 @@ def send_email_with_retry(subject, message, to_email, max_retries, base_wait):
     return False, last_err
 
 
+def _offer_fingerprint(result):
+    # Impronta dell'offerta vista: cambia se cambia prezzo/stato/resale.
+    # Nuovo biglietto a prezzo diverso => fingerprint diverso => nuovo alert.
+    import hashlib
+    parts = [
+        str(result.get("price") or ""),
+        str(result.get("min_price") or ""),
+        str(result.get("raw_price_text") or ""),
+        str(result.get("reason") or "")[:60],
+        "resale" if result.get("is_resale") else "primary",
+    ]
+    return hashlib.md5("|".join(parts).encode()).hexdigest()[:10]
+
+
 def dedupe_prefix(monitoraggio, user, platform_name):
     return "generic:%s:mon:%s:user:%s" % (platform_name, monitoraggio.id, user.id)
 
 
-def build_dedupe_key(monitoraggio, user, platform_name, realert_hours):
+def build_dedupe_key(monitoraggio, user, platform_name, realert_hours, fingerprint=None):
     prefix = dedupe_prefix(monitoraggio, user, platform_name)
     if realert_hours and realert_hours > 0:
-        # chiave unica per invio (il cooldown decide, non la chiave)
-        return "%s:%s" % (prefix, timezone.now().strftime("%Y-%m-%dT%H%M"))
+        # fp nella chiave: stesso fp = stessa offerta (cooldown); fp nuovo = nuova offerta
+        return "%s:fp:%s:%s" % (prefix, fingerprint or "na", timezone.now().strftime("%Y-%m-%dT%H%M"))
     return "%s:%s" % (prefix, timezone.now().date().isoformat())
 
 
@@ -545,11 +559,12 @@ class Command(BaseCommand):
         return platform_links
 
     # -------------------------------------------- fase 5: decisione alert ----
-    def decide_alert(self, monitoraggio, utente, platform_name, realert_hours):
+    def decide_alert(self, monitoraggio, utente, platform_name, realert_hours, result=None):
         # Ritorna (invia: bool, motivo: str, dedupe_key: str)
         from api.models import Notifica
         prefix = dedupe_prefix(monitoraggio, utente, platform_name)
-        key = build_dedupe_key(monitoraggio, utente, platform_name, realert_hours)
+        fp = _offer_fingerprint(result or {})
+        key = build_dedupe_key(monitoraggio, utente, platform_name, realert_hours, fp)
         now = timezone.now()
         # backoff FAILED: evita tempeste di retry con SMTP rotto
         recent_failed = Notifica.objects.filter(
@@ -562,12 +577,15 @@ class Command(BaseCommand):
             if failed_at and failed_at > now - timedelta(minutes=FAILED_BACKOFF_MINUTES):
                 return False, "failed_backoff", key
         if realert_hours and realert_hours > 0:
-            exists = Notifica.objects.filter(
+            same_offer = Notifica.objects.filter(
+                dedupe_key__startswith="%s:fp:%s" % (prefix, fp), status="SENT",
+                sent_at__gte=now - timedelta(hours=realert_hours)).exists()
+            if same_offer:
+                return False, "cooldown_same_offer", key
+            any_recent = Notifica.objects.filter(
                 dedupe_key__startswith=prefix, status="SENT",
                 sent_at__gte=now - timedelta(hours=realert_hours)).exists()
-            if exists:
-                return False, "cooldown", key
-            return True, "ok", key
+            return True, ("new_offer" if any_recent else "ok"), key
         # legacy: dedupe giornaliero esatto
         if Notifica.objects.filter(dedupe_key=key, status="SENT").exists():
             return False, "dedup_daily", key
@@ -755,7 +773,7 @@ class Command(BaseCommand):
                 availability = result["availability"]
                 if availability == "available":
                     invia, motivo, dedupe_key = self.decide_alert(
-                        monitoraggio, utente, platform_name, realert_hours)
+                        monitoraggio, utente, platform_name, realert_hours, result)
                     if not invia:
                         if motivo == "failed_backoff":
                             counters["failed_backoff"] += 1
