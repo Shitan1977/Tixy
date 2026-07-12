@@ -963,7 +963,7 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
     """
     permission_classes = [permissions.AllowAny]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ["performance", "status", "delivery_method"]
+    filterset_fields = ["performance", "status", "delivery_method", "is_top"]
     ordering_fields = ["price_each", "created_at"]
     ordering = ["price_each"]
 

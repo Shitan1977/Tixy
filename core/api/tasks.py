@@ -5,12 +5,16 @@ from hashlib import sha256
 from io import BytesIO
 from typing import Any, Dict, List
 
+import requests
 from celery import shared_task
+from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
 from .models import Biglietto, Performance, TicketUpload
+
+MAX_TICKET_PDF_BYTES = 15 * 1024 * 1024
 
 # --- helper sicuri: nessuna dipendenza hard obbligatoria ---
 try:
@@ -41,6 +45,42 @@ def _read_all_bytes(biglietto: Biglietto) -> bytes:
         raise RuntimeError("File PDF non presente")
     with default_storage.open(biglietto.path_file.name, "rb") as f:
         return f.read()
+
+
+def _download_source_pdf(url: str) -> bytes:
+    """
+    Scarica il PDF di un e-ticket dall'URL fornito dall'utente.
+    Limiti: max 15MB, timeout 30s, il contenuto deve essere un PDF reale.
+    """
+    url = (url or "").strip()
+    if not url:
+        raise RuntimeError("File PDF non presente")
+
+    try:
+        resp = requests.get(
+            url,
+            timeout=30,
+            stream=True,
+            allow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; TixyTicketBot/1.0)"},
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"impossibile scaricare l'e-ticket dall'URL: {e}") from e
+
+    chunks = []
+    total = 0
+    for chunk in resp.iter_content(64 * 1024):
+        total += len(chunk)
+        if total > MAX_TICKET_PDF_BYTES:
+            raise RuntimeError("e-ticket troppo grande (max 15MB)")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+
+    # alcuni generatori antepongono junk/BOM all'header PDF
+    if b"%PDF-" not in data[:1024]:
+        raise RuntimeError("l'URL non restituisce un PDF: apri il link, scarica il biglietto e caricalo come file")
+    return data
 
 
 def _safe_sha256(b: bytes) -> str:
@@ -160,7 +200,11 @@ def _parse_event_datetime(text: str):
         "novembre": 11,
         "dicembre": 12,
     }
+    # formato TicketOne: "Data: 11 Luglio 2026 Ore: 21:00"
     match = re.search(r"Data\s*:\s*(\d{1,2})\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*Ore\s*:\s*(\d{1,2}):(\d{2})", text, re.I)
+    if not match:
+        # formato Ticketmaster: "venerdì, 17 luglio 2026 - h 20:45"
+        match = re.search(r"(\d{1,2})\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*[-–]\s*h\.?\s*(\d{1,2})[:.](\d{2})", text, re.I)
     if not match:
         return None
     day, month_name, year, hour, minute = match.groups()
@@ -211,8 +255,10 @@ def _extract_ticket_codes(section_text: str) -> Dict[str, Any]:
     sigillo = None
     ticket_id = None
     et_code = None
+    barcode = None
 
-    sigillo_match = re.search(r"(?:Sigillo\s+Fiscale|S\.F\.)\s*:\s*([a-f0-9]{8,32})", section_text, re.I)
+    # copre "Sigillo Fiscale:", "S.F.:", "S.F:", "SF:" (Ticketmaster usa "SF:")
+    sigillo_match = re.search(r"(?:Sigillo\s+Fiscale|S\.?F\.?)\s*:\s*([a-f0-9]{8,32})", section_text, re.I)
     if sigillo_match:
         sigillo = sigillo_match.group(1).lower()
 
@@ -224,10 +270,21 @@ def _extract_ticket_codes(section_text: str) -> Dict[str, Any]:
     if et_match:
         et_code = et_match.group(1)
 
+    if not ticket_id:
+        tn_match = re.search(r"\bTN\s*:\s*(\d{6,20})", section_text, re.I)
+        if tn_match:
+            ticket_id = tn_match.group(1)
+
+    # fallback universale: numero di codice a barre "nudo" (sequenza lunga standalone)
+    barcode_match = re.search(r"(?<!\w)(\d{16,30})(?!\w)", section_text)
+    if barcode_match:
+        barcode = barcode_match.group(1)
+
     return {
         "sigillo": sigillo,
         "ticket_id": ticket_id,
         "et_code": et_code,
+        "barcode": barcode,
     }
 
 
@@ -241,13 +298,24 @@ def _build_ticket_rows(text: str) -> List[Dict[str, Any]]:
         code_data = _extract_ticket_codes(section)
         section_names = _extract_names(section)
         section_prices = _extract_prices(section)
-        raw_code = code_data["sigillo"] or code_data["ticket_id"] or code_data["et_code"]
+        raw_code = (
+            code_data["sigillo"]
+            or code_data["ticket_id"]
+            or code_data["et_code"]
+            or code_data.get("barcode")
+        )
         if not raw_code:
             continue
+        if code_data["sigillo"]:
+            code_type = "SIGILLO"
+        elif code_data["ticket_id"] or code_data["et_code"]:
+            code_type = "TKTID"
+        else:
+            code_type = "BARCODE"
         rows.append(
             {
                 "page": index,
-                "code_type": "SIGILLO" if code_data["sigillo"] else "TKTID",
+                "code_type": code_type,
                 "code_raw": raw_code,
                 "sigillo": code_data["sigillo"],
                 "ticket_id": code_data["ticket_id"],
@@ -351,6 +419,52 @@ def _find_matching_performance(event_name: str, venue: str, event_dt: datetime):
     return best if best_score >= 5 else None
 
 
+def _find_performance_in_text(full_text: str, event_dt: datetime):
+    """
+    Match "invertito" e indipendente dal layout del biglietto: invece di estrarre
+    nome evento/luogo con regex legate a un formato, cerca nel testo del PDF i nomi
+    di eventi e luoghi già noti a DB tra le performance vicine alla data del biglietto.
+    """
+    if not full_text or not event_dt:
+        return None
+    text_key = _normalize_key(full_text)
+    if not text_key:
+        return None
+    text_tokens = {t for t in re.split(r"[^a-z0-9]+", full_text.lower()) if len(t) >= 3}
+
+    def name_matches(name: str) -> bool:
+        key = _normalize_key(name)
+        if not key:
+            return False
+        if key in text_key:
+            return True
+        # nomi a DB più lunghi di quelli sul biglietto: basta il 60% delle parole
+        tokens = {t for t in re.split(r"[^a-z0-9]+", name.lower()) if len(t) >= 3}
+        return bool(tokens) and len(tokens & text_tokens) / len(tokens) >= 0.6
+
+    # la data sul biglietto è in ora locale, a DB è UTC: finestra ampia ma
+    # sotto le 24h per non agganciare la replica del giorno dopo
+    start = event_dt - timedelta(hours=12)
+    end = event_dt + timedelta(hours=12)
+    candidates = (
+        Performance.objects.select_related("evento", "luogo")
+        .filter(starts_at_utc__range=(start, end))
+    )
+
+    best = None
+    best_rank = None
+    for perf in candidates:
+        if not name_matches(getattr(perf.evento, "nome_evento", "")):
+            continue
+        venue_bonus = 1 if name_matches(getattr(perf.luogo, "nome", "")) else 0
+        delta = abs((perf.starts_at_utc - event_dt).total_seconds())
+        rank = (-venue_bonus, delta)
+        if best_rank is None or rank < best_rank:
+            best = perf
+            best_rank = rank
+    return best
+
+
 def _try_extract_text_names_prices(pdf_bytes: bytes) -> Dict[str, Any]:
     text = _extract_text(pdf_bytes)
     return {
@@ -395,7 +509,15 @@ def parse_ticket_pdf(self, upload_id: int):
     big = upload.biglietto
 
     try:
-        pdf_bytes = _read_all_bytes(big)
+        if big.path_file:
+            pdf_bytes = _read_all_bytes(big)
+        else:
+            # e-ticket via URL: il PDF va scaricato ora
+            pdf_bytes = _download_source_pdf(upload.source_url)
+            filename = f"eticket_{upload.id}.pdf"
+            big.path_file.save(filename, ContentFile(pdf_bytes), save=False)
+            if not big.nome_file:
+                big.nome_file = filename
         # hash file
         hf = _safe_sha256(pdf_bytes)
         if not big.hash_file:
@@ -426,9 +548,13 @@ def parse_ticket_pdf(self, upload_id: int):
         ticket_rows = _build_ticket_rows(full_text)
         codes = _scan_qr_barcodes(pdf_bytes)
 
-        perf = selected_perf or _find_matching_performance(event_name, venue, event_dt)
+        perf = (
+            selected_perf
+            or _find_matching_performance(event_name, venue, event_dt)
+            or _find_performance_in_text(full_text, event_dt)
+        )
         if perf is None:
-            raise RuntimeError("evento non riconosciuto nei nostri archivi o data non futura")
+            raise RuntimeError("evento non riconosciuto automaticamente: seleziona l'evento dal menu prima di caricare il biglietto")
 
         if perf.starts_at_utc <= timezone.now():
             raise RuntimeError("evento gia passato")
