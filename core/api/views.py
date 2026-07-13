@@ -2017,3 +2017,47 @@ class PasswordResetConfirmView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
+# =========================
+# Contatti pubblico
+# =========================
+class PublicContactView(APIView):
+    """
+    POST /api/contact/ — {name, email, subject?, message}
+    Invia una email a supporto@tixy.it. Utilizzabile anche senza account
+    (stesso comportamento del form /contatti/ del sito web).
+    """
+    authentication_classes = []
+    permission_classes = []
+
+    def post(self, request):
+        name = (request.data.get("name") or "").strip()
+        email = (request.data.get("email") or "").strip()
+        subject = (request.data.get("subject") or "").strip()
+        message = (request.data.get("message") or "").strip()
+
+        if not (name and email and message):
+            return Response(
+                {"detail": "Compila nome, email e messaggio."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            send_mail(
+                subject=f"[Tixy Contatti] {subject or 'Richiesta'} - da {name}",
+                message=f"Da: {name} <{email}>\nOggetto: {subject}\n\n{message}",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=["supporto@tixy.it"],
+                fail_silently=False,
+            )
+        except Exception:
+            return Response(
+                {"detail": "Invio non riuscito. Riprova più tardi o scrivi a supporto@tixy.it."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {"detail": "Messaggio inviato. Ti risponderemo al più presto!"},
+            status=status.HTTP_200_OK,
+        )
+

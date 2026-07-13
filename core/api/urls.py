@@ -10,6 +10,7 @@ from .views import (
     # user
     UserProfileViewSet, UserRegistrationView, ConfirmOTPView, UserProfileAPIView, PublicUserDetailView,
     ChangePasswordView, RegisterPushTokenView,
+    PasswordResetRequestView, PasswordResetConfirmView, PublicContactView,
     # catalogo
     EventoViewSet, BigliettoUploadView,
     ArtistaViewSet, LuoghiViewSet, CategoriaViewSet, PiattaformaViewSet, EventoPiattaformaViewSet,
@@ -100,6 +101,8 @@ urlpatterns = [
     path('register/', UserRegistrationView.as_view(), name='user-register'),
     path('auth/confirm-otp/', ConfirmOTPView.as_view(), name='confirm-otp'),
     path('auth/resend-otp/', ResendOTPView.as_view(), name='auth-resend-otp'),
+    path('auth/password-reset/', PasswordResetRequestView.as_view(), name='auth-password-reset'),
+    path('auth/password-reset-confirm/', PasswordResetConfirmView.as_view(), name='auth-password-reset-confirm'),
     path('public/users/<int:pk>/', PublicUserDetailView.as_view(), name='public-user-detail'),
 
     # checkout
@@ -115,6 +118,9 @@ urlpatterns = [
 
     # assistenza
     path('support/attachments/', SupportAttachmentUploadView.as_view(), name='support-attachment-upload'),
+
+    # contatti pubblico (nessuna autenticazione richiesta)
+    path('contact/', PublicContactView.as_view(), name='public-contact'),
 
 ]
 

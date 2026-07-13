@@ -21,6 +21,11 @@ def notifica_send_push(sender, instance, created, **kwargs):
             return
         title = "Tixy Alert"
         body = instance.message or "Nuova notifica disponibile"
-        send_expo_push_bulk(tokens=tokens, title=title, body=body, data={"type": "alert"})
+        send_expo_push_bulk(
+            tokens=tokens,
+            title=title,
+            body=body,
+            data={"type": "alert", "notification_id": instance.id},
+        )
     except Exception:
         pass
