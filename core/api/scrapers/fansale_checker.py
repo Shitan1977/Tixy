@@ -14,6 +14,7 @@ BRIGHTDATA_WS = os.environ.get(
 )
 
 AVAILABLE_SIGNALS = [
+    "offerte da",
     # RIMOSSI: "carica offerte" e "per caricare tutte le offerte"
     # sono testi statici del bottone, presenti anche senza biglietti disponibili.
     # Solo segnali che appaiono dopo il caricamento dinamico delle offerte reali:
@@ -26,8 +27,6 @@ UNAVAILABLE_SIGNALS = [
     "non sono state trovate offerte",
     "nessuna offerta disponibile",
     "no tickets available",
-    "sold out",
-    "esaurito",
 ]
 
 async def _check_async(url: str, verbose: bool = False) -> Dict[str, Any]:
