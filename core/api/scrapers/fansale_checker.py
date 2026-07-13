@@ -26,8 +26,6 @@ UNAVAILABLE_SIGNALS = [
     "non sono state trovate offerte",
     "nessuna offerta disponibile",
     "no tickets available",
-    "sold out",
-    "esaurito",
 ]
 
 async def _check_async(url: str, verbose: bool = False) -> Dict[str, Any]:
