@@ -42,7 +42,19 @@ def availability_for_event(event_id: int, now=None) -> tuple[int, int]:
         .count()
     )
 
-    return listing_cnt, rivendita_cnt
+    riv_ids = sorted(Rivendita.objects.filter(
+        evento_id=event_id, disponibile=True, status="PUBLISHED"
+    ).values_list("id", flat=True))
+    return listing_cnt, rivendita_cnt, riv_ids
+
+
+def make_fp_key_free(user_id, event_id, riv_ids, listing_cnt):
+    # Anti-spam a fingerprint: chiave legata al CONTENUTO (id rivendite attive
+    # + n. listing), non al tempo. Stessa situazione = stessa chiave = no reinvio.
+    # Rivendita nuova/diversa = chiave nuova = email. (fix spam 95 email/24h)
+    import hashlib
+    fp = hashlib.md5(("%s|%s" % (",".join(map(str, riv_ids)), listing_cnt)).encode()).hexdigest()[:10]
+    return f"FREE:{user_id}:{event_id}:fp:{fp}"
 
 
 def make_dedupe_key_free(user_id: int, event_id: int, bucket_minutes: int, now=None) -> str:
@@ -144,7 +156,7 @@ class Command(BaseCommand):
             user = f.user
             event = f.event
 
-            listing_cnt, rivendita_cnt = availability_for_event(event.id, now=now)
+            listing_cnt, rivendita_cnt, riv_ids = availability_for_event(event.id, now=now)
             has_availability = (listing_cnt > 0) or (rivendita_cnt > 0)
 
             if not has_availability:
@@ -187,7 +199,7 @@ class Command(BaseCommand):
                 )
                 continue
 
-            dedupe_key = make_dedupe_key_free(user.id, event.id, bucket_minutes=dedupe_minutes, now=now)
+            dedupe_key = make_fp_key_free(user.id, event.id, riv_ids, listing_cnt)
 
             if Notifica.objects.filter(monitoraggio=mon, dedupe_key=dedupe_key, status="SENT").exists():
                 skipped += 1
