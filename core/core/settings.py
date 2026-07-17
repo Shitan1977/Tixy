@@ -388,5 +388,22 @@ UNFOLD = {
 if DEBUG:
     EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
-
+# --- Regole commerciali marketplace (server-side, il client non le decide) ---
+# Commissione a carico dell'acquirente, in percentuale sul subtotale
+TIXY_BUYER_FEE_PERCENT = "10.0"
+# Fee fissa aggiuntiva a carico dell'acquirente (0 = nessuna)
+TIXY_BUYER_FEE_FLAT = "0.00"
+# Commissione a carico del venditore, in percentuale sul prezzo di vendita
+# (storicizzata sul Listing alla creazione; i frontend la leggono dalla review)
+TIXY_SELLER_FEE_PERCENT = "2.0"
+# Commissione venditore per gli annunci Boost (in primo piano)
+TIXY_SELLER_FEE_BOOST_PERCENT = "10.0"
+# Fee cambio nominativo, applicata se mancano >= 24 ore all'evento
+TIXY_CHANGE_NAME_FEE = "3.50"
+# Minuti dopo i quali un ordine PENDING non pagato viene annullato (command expire_orders)
+TIXY_PENDING_ORDER_TTL_MINUTES = 30
+# Cambio nominativo: False = disattivato per i TEST (nessuna fee al checkout e
+# consegna consentita anche con lo stesso PDF originale, sigilli invariati).
+# Rimettere True prima di andare in produzione.
+TIXY_CHANGE_NAME_ENABLED = True
 
