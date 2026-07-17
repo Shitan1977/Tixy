@@ -16,12 +16,14 @@ drf-yasg==1.21.10
 inflection==0.5.1
 lxml==6.0.2
 packaging==25.0
+pdf2image==1.17.0
 pdfminer.six==20250506
 pikepdf==9.10.2
 pillow==11.3.0
 pycparser==2.23
 PyJWT==2.9.0
 pytz==2025.2
+pyzbar==0.1.9
 PyYAML==6.0.2
 sqlparse==0.5.3
 typing_extensions==4.15.0
