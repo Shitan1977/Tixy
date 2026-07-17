@@ -30,6 +30,26 @@ def send_expo_push(token: str, title: str, body: str, data: dict | None = None) 
         return False
 
 
+def notify_user_push(user, title: str, body: str, data: dict | None = None) -> int:
+    """
+    Invia una push a tutti i device attivi dell'utente.
+    Rispetta la preferenza user.notify_push. Non solleva mai eccezioni.
+    """
+    try:
+        if user is None or not getattr(user, "notify_push", True):
+            return 0
+        from .models import PushDevice  # import locale per evitare cicli
+        tokens = list(
+            PushDevice.objects.filter(utente=user, is_active=True)
+            .values_list("token", flat=True)
+        )
+        if not tokens:
+            return 0
+        return send_expo_push_bulk(tokens=tokens, title=title, body=body, data=data)
+    except Exception:
+        return 0
+
+
 def send_expo_push_bulk(tokens: list[str], title: str, body: str, data: dict | None = None) -> int:
     """Invia push a più device, restituisce il numero di invii riusciti."""
     valid = [t for t in tokens if t and str(t).startswith("ExponentPushToken")]

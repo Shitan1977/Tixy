@@ -1,6 +1,7 @@
 # api/serializers.py
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.shortcuts import get_object_or_404
@@ -538,21 +539,24 @@ class AcquistoSerializer(serializers.ModelSerializer):
 # ---- CHECKOUT SERIALIZERS (non-model) ----
 
 class CheckoutStartSerializer(serializers.Serializer):
+    # Il checkout richiede autenticazione: l'ordine è sempre intestato a request.user.
+    # Le commissioni sono calcolate server-side (settings), mai accettate dal client.
     listing = serializers.PrimaryKeyRelatedField(queryset=Listing.objects.all())
     qty = serializers.IntegerField(min_value=1)
-    # buyer fields (anche per guest)
-    email = serializers.EmailField()
-    first_name = serializers.CharField(max_length=100)
-    last_name = serializers.CharField(max_length=100)
+    # dati anagrafici opzionali (informativi: l'utente è già autenticato)
+    email = serializers.EmailField(required=False)
+    first_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    last_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
     phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
-    # opzionale: crea account
-    create_account = serializers.BooleanField(default=False)
-    password = serializers.CharField(write_only=True, required=False, allow_blank=False)
     accepted_terms = serializers.BooleanField()
     accepted_privacy = serializers.BooleanField()
-    # fee opzionali per UI (commissioni/spese gestione)
-    fee_percent = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
-    fee_flat = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    # nuovi intestatari dei biglietti ("Nome Cognome", uno per biglietto) —
+    # comunicati dall'acquirente e mostrati al venditore per il cambio nominativo
+    holder_names = serializers.ListField(
+        child=serializers.CharField(max_length=120, allow_blank=True),
+        required=False,
+        allow_empty=True,
+    )
 
     def validate(self, attrs):
         listing: Listing = attrs["listing"]
@@ -565,8 +569,17 @@ class CheckoutStartSerializer(serializers.Serializer):
             raise serializers.ValidationError({"accepted_terms": "terms must be accepted"})
         if not attrs.get("accepted_privacy"):
             raise serializers.ValidationError({"accepted_privacy": "privacy must be accepted"})
-        if attrs.get("create_account") and not attrs.get("password"):
-            raise serializers.ValidationError({"password": "required when create_account is true"})
+
+        # normalizza i nominativi: spazi collassati, vuoti scartati, max qty voci
+        raw_names = attrs.get("holder_names") or []
+        cleaned = []
+        for name in raw_names:
+            full = " ".join(str(name or "").split())[:120]
+            if full:
+                cleaned.append(full)
+        if len(cleaned) > qty:
+            raise serializers.ValidationError({"holder_names": f"massimo {qty} nominativi (uno per biglietto)"})
+        attrs["holder_names"] = cleaned
         return attrs
 
 
@@ -610,10 +623,11 @@ class CheckoutRivenditaSerializer(serializers.Serializer):
 class OrderSummarySerializer(serializers.ModelSerializer):
     buyer_info = ShortUserProfileSerializer(source="buyer", read_only=True)
     listing_info = ListingCardSerializer(source="listing", read_only=True)
-    # breakdown calcolato (commissioni/spese)
-    subtotal = serializers.CharField(read_only=True)
-    commission = serializers.CharField(read_only=True)
-    total = serializers.CharField(read_only=True)
+    # breakdown persistito sull'ordine al checkout (calcolato server-side)
+    subtotal = serializers.SerializerMethodField()
+    commission = serializers.SerializerMethodField()
+    change_name_fee = serializers.SerializerMethodField()
+    total = serializers.SerializerMethodField()
 
     class Meta:
         model = OrderTicket
@@ -622,14 +636,31 @@ class OrderSummarySerializer(serializers.ModelSerializer):
             "buyer", "buyer_info",
             "listing", "listing_info",
             "qty", "unit_price", "total_price",
-            "subtotal", "commission", "total",
+            "subtotal", "commission", "change_name_fee", "total",
+            "holder_names",
             "created_at",
         )
         read_only_fields = (
             "status", "buyer", "buyer_info",
             "unit_price", "total_price", "currency",
-            "created_at", "subtotal", "commission", "total",
+            "created_at", "subtotal", "commission", "change_name_fee", "total",
         )
+
+    def get_subtotal(self, obj):
+        return str(obj.total_price or Decimal("0.00"))
+
+    def get_commission(self, obj):
+        return str(obj.commission or Decimal("0.00"))
+
+    def get_change_name_fee(self, obj):
+        return str(obj.change_name_fee or Decimal("0.00"))
+
+    def get_total(self, obj):
+        if obj.final_total is not None:
+            return str(obj.final_total)
+        # ordini legacy creati prima del breakdown persistito
+        total = (obj.total_price or Decimal("0.00")) + (obj.commission or Decimal("0.00")) + (obj.change_name_fee or Decimal("0.00"))
+        return str(total.quantize(Decimal("0.01")))
 class PerformanceRelatedSerializer(serializers.ModelSerializer):
     evento_nome = serializers.CharField(source="evento.nome_evento", read_only=True)
     luogo_nome = serializers.CharField(source="luogo.nome", read_only=True)
@@ -939,6 +970,14 @@ class TicketSubitemMiniSerializer(serializers.ModelSerializer):
         return ("*" * max(0, len(raw) - 6)) + raw[-6:]
 
     def get_sigillo_fiscale(self, obj):
+        # Ogni sub-biglietto ha il proprio sigillo fiscale, rilevato durante il
+        # parsing e salvato in code_raw quando code_type == "SIGILLO" (stesso
+        # dato già corretto mostrato in fase di review, TicketUploadReviewSerializer).
+        # Il fallback su biglietto.sigillo_fiscale è il valore del PDF genitore
+        # (unico per tutto il file): usarlo sempre farebbe comparire lo stesso
+        # sigillo per sub-biglietti diversi dello stesso PDF multi-biglietto.
+        if obj.code_type == "SIGILLO" and obj.code_raw:
+            return obj.code_raw
         biglietto = getattr(obj, "biglietto", None)
         return getattr(biglietto, "sigillo_fiscale", None) if biglietto else None
 
@@ -973,10 +1012,18 @@ class BigliettoDetailSerializer(serializers.ModelSerializer):
 class TicketUploadReviewSerializer(serializers.ModelSerializer):
     biglietto_info = serializers.SerializerMethodField()
     subitems = serializers.SerializerMethodField()
+    fees = serializers.SerializerMethodField()
 
     class Meta:
         model = TicketUpload
-        fields = ("id", "status", "found_count", "selectable_count", "error_message", "biglietto_info", "subitems")
+        fields = ("id", "status", "found_count", "selectable_count", "error_message", "biglietto_info", "subitems", "fees")
+
+    def get_fees(self, obj):
+        # Commissioni venditore decise server-side: i frontend le mostrano, non le decidono
+        return {
+            "seller_fee_percent": str(getattr(settings, "TIXY_SELLER_FEE_PERCENT", "2.0")),
+            "seller_fee_boost_percent": str(getattr(settings, "TIXY_SELLER_FEE_BOOST_PERCENT", "10.0")),
+        }
 
     def get_subitems(self, obj):
         rows = obj.extracted_subitems or []
@@ -1060,6 +1107,11 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
     is_top = serializers.BooleanField(default=False)
     notes = serializers.CharField(allow_blank=True, required=False)
     performance = serializers.PrimaryKeyRelatedField(queryset=Performance.objects.all(), required=False, allow_null=True)
+    # Nominativi per i biglietti senza titolare rilevato: {subitem_id: nome}.
+    # Stringa vuota = il biglietto non ha un titolare (scelta esplicita).
+    holder_names = serializers.DictField(
+        child=serializers.CharField(allow_blank=True, max_length=255), required=False
+    )
 
     def _has_active_identifier_conflict(self, selected_code_hashes):
         active = Listing.objects.filter(status__in=["ACTIVE", "RESERVED"])
@@ -1095,6 +1147,21 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
         if perf.starts_at_utc <= timezone.now():
             raise serializers.ValidationError("non puoi rivendere biglietti per eventi gia passati")
 
+        # Controllo di coerenza: se al confirm viene indicata una performance diversa
+        # da quella riconosciuta al caricamento, deve corrispondere ai dati del biglietto.
+        parsed_perf = getattr(upload.biglietto, "performance", None)
+        if parsed_perf is not None and perf.pk != parsed_perf.pk:
+            from .tasks import _name_in_text
+            extracted_event_name = (upload.biglietto.extracted_meta or {}).get("event_name") or ""
+            perf_event_name = getattr(getattr(perf, "evento", None), "nome_evento", "") or ""
+            if extracted_event_name and perf_event_name and not (
+                _name_in_text(perf_event_name, extracted_event_name)
+                or _name_in_text(extracted_event_name, perf_event_name)
+            ):
+                raise serializers.ValidationError(
+                    f"l'evento selezionato '{perf_event_name}' non corrisponde a quello del biglietto ('{extracted_event_name}')"
+                )
+
         selected_code_hashes = [item.get("code_hash") for item in selected_items if item.get("code_hash")]
         if self._has_active_identifier_conflict(selected_code_hashes):
             raise serializers.ValidationError("sigillo fiscale o barcode gia in vendita")
@@ -1124,6 +1191,16 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
         performance = validated_data["_performance"]
         upload = validated_data["_upload"]
         user = self.context["request"].user
+        holder_names = validated_data.get("holder_names") or {}
+
+        # Commissione venditore in vigore ora (server-side), storicizzata sull'annuncio
+        is_top = validated_data.get("is_top", False)
+        fee_setting = "TIXY_SELLER_FEE_BOOST_PERCENT" if is_top else "TIXY_SELLER_FEE_PERCENT"
+        fee_default = "10.0" if is_top else "2.0"
+        try:
+            seller_fee_percent = Decimal(str(getattr(settings, fee_setting, fee_default)))
+        except Exception:
+            seller_fee_percent = Decimal(fee_default)
 
         with transaction.atomic():
             listing = Listing.objects.create(
@@ -1134,9 +1211,10 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 currency=validated_data["currency"],
                 delivery_method=validated_data["delivery_method"],
                 change_name_required=validated_data.get("change_name_required", False),
-                is_top=validated_data.get("is_top", False),
-                is_pro=validated_data.get("is_top", False),
+                is_top=is_top,
+                is_pro=is_top,
                 notes=validated_data.get("notes") or "",
+                seller_fee_percent=seller_fee_percent,
                 status="ACTIVE",
             )
 
@@ -1146,7 +1224,11 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 if not raw_code or not code_hash:
                     raise serializers.ValidationError("dati ticket incompleti, riprova il caricamento")
 
-                sbi, _ = TicketSubitem.objects.select_for_update().get_or_create(
+                name_override = holder_names.get(str(item.get("id")))
+                if name_override is not None:
+                    item["full_name"] = name_override.strip() or None
+
+                sbi, sbi_created = TicketSubitem.objects.select_for_update().get_or_create(
                     code_hash=code_hash,
                     defaults=dict(
                         biglietto=upload.biglietto,
@@ -1159,6 +1241,11 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 )
                 if sbi.is_listed:
                     raise serializers.ValidationError("alcuni biglietti sono gia in vendita")
+                if sbi.is_sold:
+                    raise serializers.ValidationError("alcuni biglietti risultano gia venduti")
+                if not sbi_created and name_override is not None:
+                    sbi.full_name = item.get("full_name")
+                    sbi.save(update_fields=["full_name"])
 
                 ListingSubitem.objects.create(listing=listing, subitem=sbi)
                 sbi.is_listed = True
@@ -1167,6 +1254,10 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                     sbi.save(update_fields=["is_listed", "listed_at"])
                 else:
                     sbi.save(update_fields=["is_listed"])
+
+            if holder_names:
+                # selected_items sono le stesse righe di upload.extracted_subitems
+                upload.save(update_fields=["extracted_subitems"])
 
         return {
             "listing_id": listing.id,
@@ -1412,7 +1503,13 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
         if buyer:
             first = (buyer.first_name or "").strip()
             last = (buyer.last_name or "").strip()
-            buyer_name = " ".join(part for part in (first, last) if part).strip() or getattr(buyer, "email", None)
+            # Cognome puntato (es. "Mario R."), stessa convenzione di
+            # ShortUserProfileSerializer.get_display_name: al venditore non
+            # serve il cognome completo dell'acquirente.
+            if first and last:
+                buyer_name = f"{first} {last[0]}."
+            else:
+                buyer_name = first or last or getattr(buyer, "email", None)
 
         sold_subitems = []
         for relation in obj.subitems.select_related("subitem__biglietto").filter(subitem__is_sold=True).order_by("id"):
@@ -1432,6 +1529,7 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
             "sold_at": _fmt_dt(getattr(order, "delivered_at", None) or getattr(order, "paid_at", None) or getattr(order, "created_at", None)),
             "seller_deadline": (getattr(order, "paid_at", None) + timedelta(hours=24)).isoformat() if getattr(order, "paid_at", None) and getattr(order, "status", None) == "PAID" else None,
             "buyer_name": buyer_name,
+            "holder_names": [n for n in (getattr(order, "holder_names", None) or []) if n],
             "sold_subitems": sold_subitems,
         }
 

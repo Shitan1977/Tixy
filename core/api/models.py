@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
 import os
 import re
 from django.utils import timezone
@@ -730,6 +731,9 @@ class Listing(models.Model):
     price_each = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=3, default="EUR")
     delivery_method = models.CharField(max_length=12, choices=DELIVERY, default="PDF")
+    # Commissione venditore % in vigore alla creazione dell'annuncio (da settings,
+    # TIXY_SELLER_FEE_PERCENT o _BOOST_PERCENT): storicizzata per i payout.
+    seller_fee_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("2.00"))
 
     # --- NEW ---
     change_name_required = models.BooleanField(default=False, help_text="Se richiesto dalla piattaforma/tempi evento")
@@ -795,6 +799,23 @@ class OrderTicket(models.Model):
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=3, default="EUR")
+
+    # Breakdown calcolato server-side al checkout (persistito, non fidarsi del client)
+    commission = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    change_name_fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    final_total = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True,
+                                      help_text="Totale da addebitare: subtotale + commissione + cambio nominativo")
+
+    # Biglietto aggiornato consegnato dal venditore PER QUESTO ordine
+    # (non condiviso a livello di listing: ogni ordine ha il suo file)
+    delivered_ticket = models.ForeignKey(
+        "Biglietto", on_delete=models.SET_NULL, blank=True, null=True,
+        related_name="delivered_orders",
+    )
+
+    # Nuovi intestatari comunicati dall'acquirente al checkout
+    # (lista di stringhe "Nome Cognome", una per biglietto)
+    holder_names = models.JSONField(blank=True, null=True)
 
     status = models.CharField(max_length=10, choices=STATUS, default="PENDING")
     created_at = models.DateTimeField(auto_now_add=True)

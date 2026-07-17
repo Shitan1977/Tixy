@@ -1,3 +1,4 @@
+import os
 import re
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
@@ -15,6 +16,19 @@ from django.utils import timezone
 from .models import Biglietto, Performance, TicketUpload
 
 MAX_TICKET_PDF_BYTES = 15 * 1024 * 1024
+
+# Cartella dei binari Poppler per pdf2image (necessaria su Windows;
+# su Linux basta poppler-utils nel PATH e la variabile resta vuota).
+POPPLER_PATH = os.environ.get("POPPLER_PATH") or None
+
+# Firme di editor PDF nei metadati (/Creator, /Producer): i biglietti originali
+# sono generati dalle piattaforme (OpenPDF/iText ecc.); la presenza di un editor
+# desktop/online indica che il file è stato aperto e risalvato per modificarlo.
+PDF_EDITOR_SIGNATURES = (
+    "infix", "ilovepdf", "sejda", "smallpdf", "pdfescape", "pdf-xchange",
+    "foxit", "nitro", "pdfelement", "wondershare", "pdffiller", "xodo",
+    "pdfsam", "pdf24", "canva", "pdfcandy", "soda pdf", "master pdf",
+)
 
 # --- helper sicuri: nessuna dipendenza hard obbligatoria ---
 try:
@@ -38,6 +52,11 @@ try:
     from pyzbar.pyzbar import decode as zbar_decode
 except Exception:
     zbar_decode = None
+
+try:
+    import pikepdf
+except Exception:
+    pikepdf = None
 
 
 def _read_all_bytes(biglietto: Biglietto) -> bytes:
@@ -85,6 +104,86 @@ def _download_source_pdf(url: str) -> bytes:
 
 def _safe_sha256(b: bytes) -> str:
     return sha256(b).hexdigest()
+
+
+def _parse_pdf_meta_date(raw) -> datetime | None:
+    m = re.match(r"D:(\d{14})", str(raw or ""))
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+
+
+def _check_pdf_integrity(pdf_bytes: bytes) -> None:
+    """
+    Controlli anti-manomissione sul PDF caricato (attivi solo se pikepdf è installato):
+    - il file deve aprirsi e non essere protetto da password;
+    - date di creazione/modifica nei metadati coerenti (non nel futuro,
+      modifica non antecedente alla creazione);
+    - nessun salvataggio incrementale: un biglietto originale ha una sola
+      revisione (%%EOF); un PDF ritoccato con un editor e risalvato ne ha di più.
+      I PDF linearizzati ne hanno due legittime; i PDF firmati digitalmente
+      aggiungono revisioni per design e vengono esclusi dal controllo.
+    """
+    if pikepdf is None:
+        return
+
+    try:
+        pdf = pikepdf.open(BytesIO(pdf_bytes))
+    except pikepdf.PasswordError:
+        raise RuntimeError("il PDF è protetto da password: carica il file originale non protetto")
+    except pikepdf.PdfError:
+        raise RuntimeError("il PDF risulta danneggiato o non valido")
+
+    with pdf:
+        try:
+            info = pdf.docinfo
+        except Exception:
+            info = {}
+        # Firma di un editor PDF nei metadati → il biglietto è stato risalvato
+        # da un programma di modifica, non è il file originale della piattaforma.
+        editor_blob = ""
+        if info:
+            for key in ("/Producer", "/Creator"):
+                try:
+                    editor_blob += " " + str(info.get(key) or "")
+                except Exception:
+                    pass
+        editor_blob = editor_blob.lower()
+        for sig in PDF_EDITOR_SIGNATURES:
+            if sig in editor_blob:
+                raise RuntimeError(
+                    "il PDF risulta rielaborato con un editor e non è il biglietto originale: carica il file scaricato dalla piattaforma"
+                )
+
+        created = _parse_pdf_meta_date(info.get("/CreationDate")) if info else None
+        modified = _parse_pdf_meta_date(info.get("/ModDate")) if info else None
+
+        # tolleranza 1 giorno: le date PDF sono spesso in ora locale senza fuso
+        max_now = datetime.now() + timedelta(days=1)
+        if created and created > max_now:
+            raise RuntimeError("metadati PDF non validi: la data di creazione è nel futuro")
+        if modified and modified > max_now:
+            raise RuntimeError("metadati PDF non validi: la data di modifica è nel futuro")
+        if created and modified and modified < created:
+            raise RuntimeError("metadati PDF non validi: modifica antecedente alla creazione")
+
+        # PDF firmato digitalmente: le revisioni extra sono legittime
+        try:
+            acroform = pdf.Root.get("/AcroForm")
+            has_signature = bool(acroform is not None and acroform.get("/SigFlags"))
+        except Exception:
+            has_signature = False
+
+        if not has_signature:
+            eof_count = pdf_bytes.count(b"%%EOF")
+            allowed = 2 if getattr(pdf, "is_linearized", False) else 1
+            if eof_count > allowed:
+                raise RuntimeError(
+                    "il PDF risulta modificato dopo la generazione (salvataggio incrementale rilevato): carica il file originale"
+                )
 
 
 def _pdf_pages_count(pdf_bytes: bytes) -> int:
@@ -151,14 +250,33 @@ def _extract_ticket_sections(text: str) -> List[str]:
         return []
     parts = re.split(r"(?=Il tuo biglietto\s*DATI ORDINE)", cleaned, flags=re.I)
     sections = [_normalize_spaces(part) for part in parts if _normalize_spaces(part)]
+    if len(sections) <= 1:
+        # formato Vivaticket: un biglietto per pagina, ogni pagina inizia con "Nome:"
+        parts = re.split(r"(?=Nome\s*:)", cleaned, flags=re.I)
+        viva_sections = [_normalize_spaces(part) for part in parts if _normalize_spaces(part)]
+        if len(viva_sections) > 1:
+            sections = viva_sections
     return sections or [_normalize_spaces(cleaned)]
 
 
 def _extract_names(text: str) -> List[str]:
     names = []
     patterns = [
-        r"(?:Intestatario|Nome|Nominativo|Holder)\s*[:\-]\s*([A-ZÀ-Ý][^\n]+)",
+        # capture lazy con stop alle etichette successive: sulle sezioni normalizzate
+        # (senza newline, es. Vivaticket) evita di inglobare "Evento: ..." nel nominativo
+        r"(?:Intestatario|Nome|Nominativo|Holder)\s*[:\-]\s*([A-ZÀ-Ý][^\n]+?)(?=\s*(?:Evento|Luogo|Posto|Data|Prezzo|Sigillo|Codice)\s*:|\n|$)",
+        # TicketOne stampa@casa: nome accodato al numero barcode e seguito
+        # dal timbro emissione "ddmmyy hhmm" (es. "...002000Di mattia Christian 050726 0702").
+        # Lo spazio prima della data è \s* (non \s+): alcuni PDF vengono estratti da
+        # pdfminer senza alcuno spazio tra nome e timbro (es. "...Christian050726 0702").
+        r"\d{16,}\s*([A-ZÀ-Ý][A-Za-zÀ-ÿ'’\- ]{2,60}?)\s*\d{6}\s+\d{4}\b",
+        # Ticketmaster: il nominativo è una riga a sé adiacente a "Sistema: <numero>"
+        r"Sistema\s*:\s*\d{4,}\s*\n([A-ZÀ-Ý][A-Za-zÀ-ÿ'’\- ]{2,60})(?:\n|$)",
+        r"(?:^|\n)([A-ZÀ-Ý][A-Za-zÀ-ÿ'’\- ]{2,60})\s*\nSistema\s*:\s*\d{4,}",
         r"(?:PIT|TRIBUNA|POSTO|INTERO|RIDOTTO|PLATEA){1,4}\s*([A-Za-zÀ-ÿ'\s]{5,80}?)\s*Prezzo\s*€",
+        # Ticketmaster/MyLiveNation: il nominativo è su una riga a sé, subito prima
+        # del blocco "PI Org./PI Tit." (es. "ANNA SCALA\n\nPI Org.: ...")
+        r"(?:^|\n)([A-ZÀ-Ý][A-Za-zÀ-ÿ'’\- ]{2,60})\s*\n\s*PI\s*(?:Org|Tit)\.?\s*:",
     ]
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.I):
@@ -175,6 +293,7 @@ def _extract_prices(text: str) -> List[Decimal]:
         r"Prezzo\s*€?\s*:?\s*(\d{1,4},\d{2})",
         r"Totale\s*€?\s*:?\s*(\d{1,4},\d{2})",
         r"€\s*(\d{1,4},\d{2})",
+        r"EURO?\s*:?\s*(\d{1,4},\d{2})",
     ]
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.I):
@@ -205,12 +324,20 @@ def _parse_event_datetime(text: str):
     if not match:
         # formato Ticketmaster: "venerdì, 17 luglio 2026 - h 20:45"
         match = re.search(r"(\d{1,2})\s+([A-Za-zÀ-ÿ]+)\s+(\d{4})\s*[-–]\s*h\.?\s*(\d{1,2})[:.](\d{2})", text, re.I)
-    if not match:
-        return None
-    day, month_name, year, hour, minute = match.groups()
-    month = month_map.get(month_name.strip().lower())
-    if not month:
-        return None
+    if match:
+        day, month_name, year, hour, minute = match.groups()
+        month = month_map.get(month_name.strip().lower())
+        if not month:
+            return None
+    else:
+        # formato Vivaticket: data numerica con orario, es. "14/07/2026 19:30"
+        match = re.search(r"(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2})[:.](\d{2})", text)
+        if not match:
+            return None
+        day, month_num, year, hour, minute = match.groups()
+        month = int(month_num)
+        if not (1 <= month <= 12):
+            return None
     try:
         dt = datetime(int(year), month, int(day), int(hour), int(minute), tzinfo=dt_timezone.utc)
     except ValueError:
@@ -244,6 +371,23 @@ def _extract_event_meta(text: str) -> Dict[str, Any]:
         if fallback_event:
             event_name = _normalize_spaces(fallback_event.group(1))
 
+    # formato Vivaticket: etichette esplicite "Evento:" e "Luogo:"
+    if not event_name:
+        # ancorato a inizio riga: evita di intercettare "Tipo evento: 53" (Ticketmaster)
+        viva_event = re.search(r"(?:^|\n)\s*Evento\s*:\s*([^\n]{2,160})", text, re.I)
+        if viva_event:
+            candidate = _normalize_spaces(viva_event.group(1))
+            # rimuove code tipo "- Opening Act: 14/07/2026 19:30" o la sola data/ora finale
+            candidate = re.sub(r"\s*Luogo\s*:.*$", "", candidate, flags=re.I)
+            candidate = re.sub(r"\s*[-–]?\s*Opening\s+Act\s*:.*$", "", candidate, flags=re.I)
+            candidate = re.sub(r"\s*[-–]?\s*\d{1,2}/\d{1,2}/\d{4}(?:\s+\d{1,2}[:.]\d{2})?\s*$", "", candidate)
+            event_name = candidate.strip(" -–") or None
+
+    if not venue:
+        viva_venue = re.search(r"Luogo\s*:\s*([^\n]{2,120})", text, re.I)
+        if viva_venue:
+            venue = _normalize_spaces(viva_venue.group(1)) or None
+
     return {
         "event_name": event_name,
         "venue": venue,
@@ -257,8 +401,17 @@ def _extract_ticket_codes(section_text: str) -> Dict[str, Any]:
     et_code = None
     barcode = None
 
-    # copre "Sigillo Fiscale:", "S.F.:", "S.F:", "SF:" (Ticketmaster usa "SF:")
-    sigillo_match = re.search(r"(?:Sigillo\s+Fiscale|S\.?F\.?)\s*:\s*([a-f0-9]{8,32})", section_text, re.I)
+    # copre "Sigillo Fiscale:", "S.F.:", "SF:" (Ticketmaster) e "S.F. <hex>" senza
+    # due punti, anche ripetuto dopo l'etichetta come su Vivaticket ("Sigillo Fiscale: S.F. 5633...").
+    # Niente \b finale: in alcuni PDF pdfminer non lascia alcuno spazio tra il codice
+    # e la parola successiva (es. "...fac8Geolier"), e lì carattere-parola-a-carattere-
+    # parola non è mai un confine \b; la classe [a-f0-9] già delimita correttamente
+    # la lunghezza del codice da sola.
+    sigillo_match = re.search(
+        r"(?:Sigillo\s+Fiscale|S\.?F\.?)\s*:?\s*(?:S\.?F\.?\s*)?([a-f0-9]{8,32})",
+        section_text,
+        re.I,
+    )
     if sigillo_match:
         sigillo = sigillo_match.group(1).lower()
 
@@ -319,6 +472,8 @@ def _build_ticket_rows(text: str) -> List[Dict[str, Any]]:
                 "code_raw": raw_code,
                 "sigillo": code_data["sigillo"],
                 "ticket_id": code_data["ticket_id"],
+                "et_code": code_data["et_code"],
+                "barcode": code_data.get("barcode"),
                 "full_name": (section_names or fallback_names or [None])[0],
                 "price": (section_prices or fallback_prices or [None])[0],
             }
@@ -378,6 +533,41 @@ def _serialize_subitems_for_upload(rows: List[Dict[str, Any]], codes: List[Dict[
         )
 
     return temp_rows
+
+
+def _codes_mismatch(ticket_rows: List[Dict[str, Any]], codes: List[Dict[str, Any]]) -> bool:
+    """
+    True se il testo del PDF e i codici QR/barcode scansionati sono incoerenti:
+    nessuno degli identificativi letti dal testo (TktID/ET/barcode) compare nei
+    codici scansionati → il testo è stato alterato rispetto ai codici originali.
+    """
+    if not ticket_rows or not codes:
+        return False
+    text_ids = set()
+    for row in ticket_rows:
+        for key in ("ticket_id", "et_code", "barcode"):
+            if row.get(key):
+                text_ids.add(str(row[key]))
+    code_blob = " ".join((c.get("code_raw") or "") for c in codes)
+    return bool(text_ids and code_blob and not any(tid in code_blob for tid in text_ids))
+
+
+def _name_in_text(name: str, full_text: str) -> bool:
+    """
+    True se il nome (evento/luogo) risulta presente nel testo del biglietto.
+    Match esatto sulla chiave normalizzata oppure almeno il 60% delle parole.
+    """
+    if not name or not full_text:
+        return False
+    key = _normalize_key(name)
+    text_key = _normalize_key(full_text)
+    if not key or not text_key:
+        return False
+    if key in text_key:
+        return True
+    tokens = {t for t in re.split(r"[^a-z0-9]+", name.lower()) if len(t) >= 3}
+    text_tokens = {t for t in re.split(r"[^a-z0-9]+", full_text.lower()) if len(t) >= 3}
+    return bool(tokens) and len(tokens & text_tokens) / len(tokens) >= 0.6
 
 
 def _find_matching_performance(event_name: str, venue: str, event_dt: datetime):
@@ -446,9 +636,12 @@ def _find_performance_in_text(full_text: str, event_dt: datetime):
     # sotto le 24h per non agganciare la replica del giorno dopo
     start = event_dt - timedelta(hours=12)
     end = event_dt + timedelta(hours=12)
+    # esclude performance già passate: un'edizione storica dello stesso evento/luogo
+    # non deve mai vincere il match su quella futura corretta (coerente con
+    # _find_matching_performance, che già escludeva il passato)
     candidates = (
         Performance.objects.select_related("evento", "luogo")
-        .filter(starts_at_utc__range=(start, end))
+        .filter(starts_at_utc__gte=timezone.now(), starts_at_utc__range=(start, end))
     )
 
     best = None
@@ -484,7 +677,7 @@ def _scan_qr_barcodes(pdf_bytes: bytes) -> List[Dict[str, Any]]:
         return items
 
     try:
-        pages = convert_from_bytes(pdf_bytes, fmt="png", dpi=200)
+        pages = convert_from_bytes(pdf_bytes, fmt="png", dpi=200, poppler_path=POPPLER_PATH)
         for idx, img in enumerate(pages, start=1):
             # prova 4 rotazioni
             for rot in (0, 90, 180, 270):
@@ -523,6 +716,23 @@ def parse_ticket_pdf(self, upload_id: int):
         if not big.hash_file:
             big.hash_file = hf
 
+        # Anti-manomissione: metadati e salvataggi incrementali
+        _check_pdf_integrity(pdf_bytes)
+
+        # Dedup applicativo (i vincoli condizionali su hash non esistono su MariaDB):
+        # lo stesso identico PDF caricato da un ALTRO utente è sospetto (file condiviso).
+        # Lo stesso utente può ricaricarlo (es. retry dopo errore evento).
+        duplicate_other_user = (
+            Biglietto.objects
+            .filter(hash_file=hf)
+            .exclude(pk=big.pk)
+            .filter(uploads__isnull=False)
+            .exclude(uploads__seller_id=upload.seller_id)
+            .exists()
+        )
+        if duplicate_other_user:
+            raise RuntimeError("questo PDF risulta già caricato da un altro utente")
+
         # Conteggio pagine
         pages = _pdf_pages_count(pdf_bytes) or 0
         big.pages_count = pages
@@ -548,13 +758,35 @@ def parse_ticket_pdf(self, upload_id: int):
         ticket_rows = _build_ticket_rows(full_text)
         codes = _scan_qr_barcodes(pdf_bytes)
 
+        # Cross-check testo ↔ QR/barcode (attivo quando la scansione è disponibile)
+        if _codes_mismatch(ticket_rows, codes):
+            raise RuntimeError(
+                "i codici QR/barcode non corrispondono ai dati del biglietto: il PDF potrebbe essere stato modificato"
+            )
+
+        # Controllo di coerenza: se l'utente ha selezionato un evento, deve
+        # corrispondere a quello che risulta dal biglietto (nome e/o data).
+        if selected_perf is not None and full_text.strip():
+            selected_event_name = getattr(getattr(selected_perf, "evento", None), "nome_evento", "") or ""
+            pdf_event_name = meta.get("event_name")
+            pdf_event_dt = meta.get("event_date")
+            if selected_event_name and not _name_in_text(selected_event_name, full_text):
+                detected = f" (nel biglietto risulta '{pdf_event_name}')" if pdf_event_name else ""
+                raise RuntimeError(
+                    f"l'evento selezionato '{selected_event_name}' non corrisponde a quello del biglietto{detected}: verifica la selezione"
+                )
+            if pdf_event_dt and selected_perf.starts_at_utc and abs((selected_perf.starts_at_utc - pdf_event_dt).total_seconds()) > 12 * 3600:
+                raise RuntimeError(
+                    "la data del biglietto non corrisponde alla data dell'evento selezionato: verifica la selezione"
+                )
+
         perf = (
             selected_perf
             or _find_matching_performance(event_name, venue, event_dt)
             or _find_performance_in_text(full_text, event_dt)
         )
         if perf is None:
-            raise RuntimeError("evento non riconosciuto automaticamente: seleziona l'evento dal menu prima di caricare il biglietto")
+            raise RuntimeError("evento non riconosciuto automaticamente: seleziona l'evento e ricarica il biglietto")
 
         if perf.starts_at_utc <= timezone.now():
             raise RuntimeError("evento gia passato")

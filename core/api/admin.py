@@ -1,5 +1,6 @@
 # api/admin.py
 from django.contrib import admin
+from django.db.models import Q
 from django.utils.html import format_html
 from django.utils.timezone import localtime
 from django import forms
@@ -466,16 +467,41 @@ class EventFollowAdmin(ModelAdmin):
 
 # ============== Marketplace ==============
 
+class NomeRilevatoFilter(admin.SimpleListFilter):
+    """Isola i biglietti per cui il parsing automatico non ha trovato il nome
+    dell'intestatario (nome_intestatario vuoto/null), cosi da poter raccogliere
+    i casi reali su cui migliorare le regex di estrazione in tasks.py."""
+    title = "nome rilevato"
+    parameter_name = "nome_rilevato"
+
+    def lookups(self, request, model_admin):
+        return (("no", "No (da controllare)"), ("si", "Si"))
+
+    def queryset(self, request, queryset):
+        manca_nome = Q(nome_intestatario__isnull=True) | Q(nome_intestatario__exact="")
+        if self.value() == "no":
+            return queryset.filter(manca_nome)
+        if self.value() == "si":
+            return queryset.exclude(manca_nome)
+        return queryset
+
+
 @admin.register(Biglietto)
 class BigliettoAdmin(ModelAdmin):
     # Custom Admin Pannel
     paginator = InfinitePaginator
     show_full_result_count = True
 
-    list_display = ("id", "nome_file", "nome_intestatario", "sigillo_fiscale", "is_valid", "creato_il")
+    list_display = ("id", "nome_file", "nome_intestatario", "sigillo_fiscale", "is_valid", "creato_il", "pdf_link")
     list_display_links = ("id","nome_file","nome_intestatario")
-    list_filter = ("is_valid",)
+    list_filter = ("is_valid", NomeRilevatoFilter)
     search_fields = ("nome_file", "nome_intestatario", "sigillo_fiscale", "hash_file")
+
+    def pdf_link(self, obj):
+        if not obj.path_file:
+            return "—"
+        return format_html('<a href="{}" target="_blank">Apri PDF</a>', obj.path_file.url)
+    pdf_link.short_description = "PDF"
 
     
 class ListingTicketInline(TabularInline):

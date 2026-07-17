@@ -17,14 +17,33 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, permissions, status, generics, filters, mixins, serializers
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.negotiation import BaseContentNegotiation
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+
+class IgnoreClientContentNegotiation(BaseContentNegotiation):
+    """
+    Per endpoint che servono un file binario (es. download PDF) con
+    FileResponse: DRF negozia il Content-Type PRIMA di eseguire la view,
+    quindi un client che manda 'Accept: application/pdf' riceve 406 perché
+    nessun renderer di default (JSON/Browsable) dichiara quel media type,
+    anche se la view non usa mai i renderer per costruire la risposta.
+    Bypassa la negoziazione e lascia che sia la view a decidere il content-type.
+    """
+
+    def select_parser(self, request, parsers):
+        return parsers[0]
+
+    def select_renderer(self, request, renderers, format_suffix):
+        return (renderers[0], renderers[0].media_type)
+
 from drf_yasg.utils import swagger_auto_schema
 
 from .utils import invia_otp_email, invia_email_venditore_vendita, invia_email_acquirente_consegna
+from .notifications import notify_user_push
 from .validation import file_validation
 from .filters import PerformanceSearchFilter, EventSearchFilter
 
@@ -1052,8 +1071,11 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
     def preview(self, request, pk=None):
         """
         POST /api/listings/{id}/preview/
-        Body: { "qty": 2, "fee_percent": 10, "fee_flat": 2.5 }  (fee_* opzionali)
-        Ritorna breakdown: unit_price, subtotal, commission, total.
+        Body: { "qty": 2 }
+        Ritorna breakdown: unit_price, subtotal, commission, change_name_fee, total.
+        Usa la stessa formula server-side di CheckoutStartView (_buyer_pricing):
+        l'anteprima mostrata prima dell'acquisto corrisponde esattamente a quanto
+        verrà addebitato al checkout, invece di far decidere commissione/fee al client.
         """
         listing = self.get_object()
         try:
@@ -1071,23 +1093,8 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
                             status=status.HTTP_400_BAD_REQUEST)
 
         unit = listing.price_each
-        subtotal = unit * qty
-
-        commission = Decimal("0.00")
-        try:
-            fee_percent = request.data.get("fee_percent", None)
-            if fee_percent is not None:
-                commission += (subtotal * Decimal(str(fee_percent)) / Decimal("100")).quantize(Decimal("0.01"))
-        except Exception:
-            pass
-        try:
-            fee_flat = request.data.get("fee_flat", None)
-            if fee_flat is not None:
-                commission += Decimal(str(fee_flat)).quantize(Decimal("0.01"))
-        except Exception:
-            pass
-
-        total = (subtotal + commission).quantize(Decimal("0.01"))
+        subtotal = (unit * qty).quantize(Decimal("0.01"))
+        pricing = _buyer_pricing(subtotal, listing.performance, qty)
 
         return Response({
             "listing_id": listing.id,
@@ -1095,8 +1102,9 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
             "unit_price": str(unit),
             "qty": qty,
             "subtotal": str(subtotal),
-            "commission": str(commission),
-            "total": str(total),
+            "commission": str(pricing["commission"]),
+            "change_name_fee": str(pricing["change_name_fee"]),
+            "total": str(pricing["final_total"]),
             "delivery_method": listing.delivery_method,
             "available_qty": available_qty,
         }, status=status.HTTP_200_OK)
@@ -1114,6 +1122,8 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
     queryset = OrderTicket.objects.select_related("listing", "buyer").all()
     serializer_class = OrderTicketSerializer
     permission_classes = [permissions.IsAuthenticated]
+    # niente PUT/PATCH/DELETE: lo stato dell'ordine cambia solo tramite le action dedicate
+    http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -1124,6 +1134,13 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         return qs.filter(buyer=self.request.user)
 
     def create(self, request, *args, **kwargs):
+        # il flusso pubblico di acquisto è /api/checkout/start/ (breakdown persistito,
+        # controlli anti self-buy/evento passato): la create diretta resta solo per staff
+        if not request.user.is_staff:
+            return Response(
+                {"detail": "usa /api/checkout/start/ per creare un ordine"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         listing_id = request.data.get("listing")
         try:
             qty = int(request.data.get("qty", 1))
@@ -1188,11 +1205,16 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         now_ts = dj_timezone.now()
 
         with transaction.atomic():
-            order.status = "PAID"
-            order.paid_at = now_ts
-            order.save(update_fields=["status", "paid_at"])
+            # lock su ordine e listing: due conferme concorrenti sullo stesso
+            # listing non devono corrompere i conteggi
+            order = OrderTicket.objects.select_for_update().get(pk=order.pk)
+            if order.status in ("PAID", "DELIVERED"):
+                return Response({"detail": "already confirmed"}, status=200)
+            if order.status != "PENDING":
+                return Response({"detail": f"ordine in stato '{order.status}': conferma non consentita"},
+                                status=status.HTTP_400_BAD_REQUEST)
 
-            listing = order.listing
+            listing = Listing.objects.select_for_update().get(pk=order.listing_id)
             unsold_relations = list(
                 listing.subitems
                 .select_related("subitem")
@@ -1200,11 +1222,17 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
                 .order_by("subitem_id", "id")
             )
 
+            # tutti i controlli PRIMA di scrivere: un return qui non lascia
+            # l'ordine PAID senza biglietti assegnati
             if len(unsold_relations) < int(order.qty or 0):
                 return Response(
                     {"detail": "ticket availability mismatch"},
                     status=status.HTTP_409_CONFLICT,
                 )
+
+            order.status = "PAID"
+            order.paid_at = now_ts
+            order.save(update_fields=["status", "paid_at"])
 
             to_sell = unsold_relations[: int(order.qty or 0)]
             for lsi in to_sell:
@@ -1226,6 +1254,21 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             invia_email_venditore_vendita(order, deadline)
         except Exception:
             pass
+        holder_names = [n for n in (order.holder_names or []) if n]
+        if holder_names:
+            push_body = (
+                f"Ordine #{order.id}: nuovo intestatario {holder_names[0]}"
+                + (f" (+{len(holder_names) - 1})" if len(holder_names) > 1 else "")
+                + ". Carica il biglietto aggiornato entro 24 ore."
+            )
+        else:
+            push_body = f"Ordine #{order.id}: carica il biglietto aggiornato entro 24 ore dalla sezione Rivendite."
+        notify_user_push(
+            order.listing.seller,
+            "Biglietto venduto! 🎉",
+            push_body,
+            {"type": "order_paid", "order_id": order.id},
+        )
 
         return Response({
             "detail": "confirmed",
@@ -1241,7 +1284,9 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         """
         POST /api/orders/{id}/seller-upload/
         Il venditore carica il PDF aggiornato (nome + sigillo fiscale cambiati).
-        Il file sovrascrive il Biglietto collegato al listing tramite ListingTicket.
+        Il file viene salvato come NUOVO Biglietto di consegna collegato
+        all'ordine (order.delivered_ticket): l'originale resta intatto e ogni
+        ordine ha il proprio file (nessuna condivisione tra acquirenti).
         Segna l'ordine come DELIVERED e notifica l'acquirente.
         """
         import hashlib as _hashlib
@@ -1262,41 +1307,149 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         if not file_obj:
             return Response({"detail": "Carica il file PDF aggiornato (campo: path_file)"}, status=400)
 
-        # Trova il Biglietto collegato al listing
-        biglietto = None
-        lt = ListingTicket.objects.filter(listing=order.listing).select_related("biglietto").first()
-        if lt and lt.biglietto:
-            biglietto = lt.biglietto
-        if biglietto is None:
-            lsi = (ListingSubitem.objects
-                   .filter(listing=order.listing)
-                   .select_related("subitem__biglietto").first())
-            if lsi and lsi.subitem and lsi.subitem.biglietto:
-                biglietto = lsi.subitem.biglietto
+        # --- Validazione file: deve essere un PDF reale, max 15MB ---
+        if file_obj.size and file_obj.size > 15 * 1024 * 1024:
+            return Response({"detail": "File troppo grande (max 15MB)"}, status=400)
 
         file_content = file_obj.read()
+        if len(file_content) > 15 * 1024 * 1024:
+            return Response({"detail": "File troppo grande (max 15MB)"}, status=400)
+        if b"%PDF-" not in file_content[:1024]:
+            return Response({"detail": "Il file non è un PDF valido"}, status=400)
+
+        # --- Anti-manomissione: stessi controlli del caricamento in rivendita ---
+        from .tasks import (
+            _check_pdf_integrity, _extract_text, _extract_event_meta,
+            _build_ticket_rows, _scan_qr_barcodes, _codes_mismatch, _name_in_text,
+        )
+        try:
+            _check_pdf_integrity(file_content)
+        except RuntimeError as e:
+            return Response({"detail": str(e)}, status=400)
+
+        try:
+            delivery_text = _extract_text(file_content) or ""
+        except Exception:
+            delivery_text = ""
+
+        # --- Coerenza evento: il PDF consegnato deve riferirsi all'evento venduto ---
+        perf = order.listing.performance
+        if delivery_text.strip() and perf is not None:
+            sold_event_name = getattr(getattr(perf, "evento", None), "nome_evento", "") or ""
+            if sold_event_name and not _name_in_text(sold_event_name, delivery_text):
+                detected = (_extract_event_meta(delivery_text) or {}).get("event_name")
+                extra = f" (nel PDF risulta '{detected}')" if detected else ""
+                return Response(
+                    {"detail": f"il PDF caricato non risulta riferito all'evento venduto '{sold_event_name}'{extra}"},
+                    status=400,
+                )
+            pdf_event_dt = (_extract_event_meta(delivery_text) or {}).get("event_date")
+            if pdf_event_dt and perf.starts_at_utc and abs((perf.starts_at_utc - pdf_event_dt).total_seconds()) > 12 * 3600:
+                return Response(
+                    {"detail": "la data del biglietto caricato non corrisponde alla data dell'evento venduto"},
+                    status=400,
+                )
+
+        delivery_rows = _build_ticket_rows(delivery_text)
+
+        # --- Il PDF consegnato deve contenere almeno tanti biglietti quanti
+        # ne ha acquistati l'acquirente: un PDF con meno biglietti rilevati
+        # dell'ordine non copre tutta la vendita (es. ordine da 3, PDF con 1). ---
+        ordered_qty = int(order.qty or 0)
+        if delivery_rows and len(delivery_rows) < ordered_qty:
+            return Response(
+                {"detail": f"il PDF caricato contiene solo {len(delivery_rows)} bigliett{'o' if len(delivery_rows) == 1 else 'i'} "
+                           f"rilevat{'o' if len(delivery_rows) == 1 else 'i'}, ma l'ordine è di {ordered_qty}: "
+                           f"carica un PDF che contenga tutti i biglietti acquistati"},
+                status=400,
+            )
+
+        # --- Cross-check testo ↔ QR/barcode (best-effort, come al caricamento) ---
+        try:
+            if _codes_mismatch(delivery_rows, _scan_qr_barcodes(file_content)):
+                return Response(
+                    {"detail": "i codici QR/barcode non corrispondono ai dati del biglietto: il PDF potrebbe essere stato modificato"},
+                    status=400,
+                )
+        except Exception:
+            pass
+
+        from django.conf import settings as dj_settings
+        # Il cambio nominativo va imposto solo se QUESTO ordine lo richiedeva
+        # davvero (mancavano >=24h all'evento al momento dell'acquisto, vedi
+        # _buyer_pricing): order.change_name_fee è il valore persistito allora.
+        # Con un ordine acquistato sotto le 24h (fee = 0) il biglietto originale
+        # non va mai rinominato, quindi i controlli anti-riuso qui sotto non
+        # devono bloccare la consegna dello stesso ticket invariato.
+        name_change_enabled = (
+            bool(getattr(dj_settings, "TIXY_CHANGE_NAME_ENABLED", True))
+            and Decimal(order.change_name_fee or 0) > 0
+        )
+
         new_hash = _hashlib.sha256(file_content).hexdigest()
-        ext = _os.path.splitext(file_obj.name)[1] or ".pdf"
-        dest_name = f"delivery/order_{order.id}_{new_hash[:12]}{ext}"
+        existing_same = Biglietto.objects.filter(hash_file=new_hash).first()
 
-        from django.core.files.base import ContentFile as _CF
-        saved_path = default_storage.save(dest_name, _CF(file_content))
+        # File identico a un biglietto già noto (es. l'originale ricaricato):
+        # non è il biglietto aggiornato con il nuovo nominativo.
+        # Saltato se il cambio nominativo non era richiesto per questo ordine
+        # (fee=0) o con TIXY_CHANGE_NAME_ENABLED=False (test).
+        if name_change_enabled and existing_same:
+            return Response(
+                {"detail": "Questo PDF è identico a un biglietto già presente: carica il biglietto AGGIORNATO con il nuovo nominativo"},
+                status=400,
+            )
 
-        if biglietto:
-            # Sovrascrive il file sul Biglietto esistente
-            if biglietto.path_file:
-                try:
-                    default_storage.delete(biglietto.path_file.name)
-                except Exception:
-                    pass
-            biglietto.path_file.name = saved_path
-            biglietto.nome_file = file_obj.name
-            biglietto.hash_file = new_hash
-            biglietto.mime_type = file_obj.content_type or "application/pdf"
-            biglietto.file_size = len(file_content)
-            biglietto.save(update_fields=["path_file", "nome_file", "hash_file", "mime_type", "file_size"])
+        # --- Controllo soft sui sigilli fiscali: se il PDF caricato contiene ---
+        # gli stessi sigilli dell'originale, il biglietto non è stato rinominato.
+        # Saltato se il cambio nominativo non era richiesto per questo ordine
+        # (fee=0) o con TIXY_CHANGE_NAME_ENABLED=False (test).
+        if name_change_enabled:
+            try:
+                from .tasks import _extract_text, _build_ticket_rows
+                new_sigilli = {
+                    row["sigillo"] for row in _build_ticket_rows(_extract_text(file_content) or "")
+                    if row.get("sigillo")
+                }
+                if new_sigilli:
+                    old_sigilli = set()
+                    for lsi in (ListingSubitem.objects
+                                .filter(listing=order.listing)
+                                .select_related("subitem__biglietto")):
+                        sub = lsi.subitem
+                        big_orig = getattr(sub, "biglietto", None) if sub else None
+                        if big_orig and big_orig.sigillo_fiscale:
+                            old_sigilli.add(str(big_orig.sigillo_fiscale).lower())
+                        meta = (big_orig.extracted_meta or {}) if big_orig else {}
+                        for sig in meta.get("sigilli") or []:
+                            if sig:
+                                old_sigilli.add(str(sig).lower())
+                        raw = (sub.code_raw or "").strip().lower() if sub else ""
+                        if raw and (sub.code_type or "").upper() == "SIGILLO":
+                            old_sigilli.add(raw)
+                    if old_sigilli and (new_sigilli & old_sigilli):
+                        return Response(
+                            {"detail": "Il PDF contiene ancora il sigillo fiscale originale: il biglietto non risulta aggiornato"},
+                            status=400,
+                        )
+            except Exception:
+                # il controllo è best-effort: un errore di parsing non blocca la consegna
+                pass
+
+        if existing_same:
+            # cambio nominativo disattivato: consegna lo stesso biglietto già noto
+            # riusandolo, senza duplicare il file (eviterebbe anche il vincolo
+            # unique su hash_file)
+            biglietto = existing_same
+            if not biglietto.path_file:
+                return Response({"detail": "Il biglietto esistente non ha un file associato: riprova con un PDF"}, status=400)
         else:
-            # Crea un Biglietto di consegna e lo collega al listing
+            ext = _os.path.splitext(file_obj.name)[1] or ".pdf"
+            dest_name = f"delivery/order_{order.id}_{new_hash[:12]}{ext}"
+
+            from django.core.files.base import ContentFile as _CF
+            saved_path = default_storage.save(dest_name, _CF(file_content))
+
+            # Nuovo Biglietto di consegna dedicato a QUESTO ordine (l'originale resta intatto)
             biglietto = Biglietto(
                 nome_file=file_obj.name,
                 hash_file=new_hash,
@@ -1307,22 +1460,27 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             biglietto.path_file.name = saved_path
             biglietto.save()
 
-        # Garantisce sempre il collegamento listing->biglietto usato dal download buyer.
-        ListingTicket.objects.get_or_create(listing=order.listing, biglietto=biglietto)
-
         now_ts = dj_timezone.now()
+        order.delivered_ticket = biglietto
         order.status = "DELIVERED"
         order.delivered_at = now_ts
-        order.save(update_fields=["status", "delivered_at"])
+        order.save(update_fields=["delivered_ticket", "status", "delivered_at"])
 
         try:
             invia_email_acquirente_consegna(order)
         except Exception:
             pass
+        notify_user_push(
+            order.buyer,
+            "Il tuo biglietto è pronto 🎫",
+            f"Ordine #{order.id}: scaricalo da \"I miei biglietti\".",
+            {"type": "order_delivered", "order_id": order.id},
+        )
 
         return Response({"detail": "biglietto caricato e ordine consegnato", "order_id": order.id}, status=200)
 
-    @action(detail=True, methods=["get"], url_path="download", permission_classes=[permissions.IsAuthenticated])
+    @action(detail=True, methods=["get"], url_path="download", permission_classes=[permissions.IsAuthenticated],
+            content_negotiation_class=IgnoreClientContentNegotiation)
     def download(self, request, pk=None):
         """
         GET /api/orders/{id}/download/
@@ -1344,16 +1502,20 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
                 status=status.HTTP_202_ACCEPTED,
             )
 
-        # Trova il file aggiornato tramite ListingTicket
+        # File consegnato per QUESTO ordine (nuovo flusso)
         biglietto = None
-        lt = (ListingTicket.objects
-              .filter(listing=order.listing)
-              .select_related("biglietto")
-              .first())
-        if lt and lt.biglietto and lt.biglietto.path_file:
-            biglietto = lt.biglietto
+        if order.delivered_ticket and order.delivered_ticket.path_file:
+            biglietto = order.delivered_ticket
 
-        # Fallback: alcune consegne legacy sono collegate solo ai subitems del listing.
+        # Fallback legacy: consegne fatte prima dell'introduzione di delivered_ticket
+        if biglietto is None:
+            lt = (ListingTicket.objects
+                  .filter(listing=order.listing)
+                  .select_related("biglietto")
+                  .first())
+            if lt and lt.biglietto and lt.biglietto.path_file:
+                biglietto = lt.biglietto
+
         if biglietto is None:
             lsi = (ListingSubitem.objects
                    .filter(listing=order.listing)
@@ -1381,13 +1543,41 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 # CHECKOUT START + SUMMARY (senza pagamenti per ora)
 # ---------------------------
 
+def _buyer_pricing(subtotal: Decimal, performance, qty: int = 1) -> dict:
+    """
+    Calcola commissione acquirente e fee cambio nominativo SERVER-SIDE
+    (da settings, mai dal payload del client).
+    """
+    from django.conf import settings as dj_settings
+
+    fee_percent = Decimal(str(getattr(dj_settings, "TIXY_BUYER_FEE_PERCENT", "0")))
+    fee_flat = Decimal(str(getattr(dj_settings, "TIXY_BUYER_FEE_FLAT", "0")))
+    change_fee_amount = Decimal(str(getattr(dj_settings, "TIXY_CHANGE_NAME_FEE", "3.50")))
+
+    commission = (subtotal * fee_percent / Decimal("100") + fee_flat).quantize(Decimal("0.01"))
+
+    # cambio nominativo richiesto solo se mancano >= 24h all'evento
+    # (TIXY_CHANGE_NAME_ENABLED=False lo disattiva del tutto, es. in fase di test).
+    # La fee è per singolo biglietto: il venditore deve rifare il cambio
+    # nominativo su ciascuno dei biglietti acquistati, non una volta sola.
+    change_fee = Decimal("0.00")
+    if getattr(dj_settings, "TIXY_CHANGE_NAME_ENABLED", True):
+        starts_at = getattr(performance, "starts_at_utc", None)
+        if starts_at and (starts_at - dj_timezone.now()) >= timedelta(hours=24):
+            change_fee = (change_fee_amount * max(1, int(qty or 1))).quantize(Decimal("0.01"))
+
+    final_total = (subtotal + commission + change_fee).quantize(Decimal("0.01"))
+    return {"commission": commission, "change_name_fee": change_fee, "final_total": final_total}
+
+
 class CheckoutStartView(APIView):
     """
     POST /api/checkout/start/
-    Crea (o riusa) l'utente se necessario, crea ordine PENDING atomico,
-    ritorna riepilogo (subtotal/commission/total) per la UI.
+    Crea un ordine PENDING atomico per l'utente autenticato e ritorna il
+    riepilogo (subtotal/commission/change_name_fee/total) calcolato e
+    persistito server-side.
     """
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
         ser = CheckoutStartSerializer(data=request.data)
@@ -1396,71 +1586,43 @@ class CheckoutStartView(APIView):
 
         listing: Listing = data["listing"]
         qty: int = data["qty"]
+        user = request.user
 
-        fee_percent = data.get("fee_percent")
-        fee_flat = data.get("fee_flat")
-
-        # 1) identifica/crea utente
-        user = request.user if request.user.is_authenticated else None
-        if not user:
-            user = User.objects.filter(email=data["email"].lower()).first()
-            if not user and data.get("create_account"):
-                user = User.objects.create_user(
-                    email=data["email"].lower(),
-                    password=data["password"],
-                    first_name=data["first_name"],
-                    last_name=data["last_name"],
-                    phone_number=data.get("phone_number") or "",
-                    accepted_terms=data["accepted_terms"],
-                    accepted_privacy=data["accepted_privacy"],
-                )
-                user.is_active = True
-                user.is_verified = False
-                user.save(update_fields=["is_active", "is_verified"])
-            elif not user:
-                user = User.objects.create_user(
-                    email=data["email"].lower(),
-                    password=None,
-                    first_name=data["first_name"],
-                    last_name=data["last_name"],
-                    phone_number=data.get("phone_number") or "",
-                    accepted_terms=data["accepted_terms"],
-                    accepted_privacy=data["accepted_privacy"],
-                )
-
-        # 2) crea ordine PENDING in modo atomico e scala qty
+        # crea ordine PENDING in modo atomico e scala qty
         with transaction.atomic():
-            locked = Listing.objects.select_for_update().get(pk=listing.pk)
+            locked = Listing.objects.select_for_update().select_related("performance").get(pk=listing.pk)
             available_qty = _available_listing_qty(locked)
             if locked.status != "ACTIVE":
                 return Response({"detail": "listing not active"}, status=status.HTTP_400_BAD_REQUEST)
+            if locked.seller_id == user.id:
+                return Response({"detail": "non puoi acquistare i tuoi biglietti"},
+                                status=status.HTTP_400_BAD_REQUEST)
+            perf = locked.performance
+            if perf and perf.starts_at_utc and perf.starts_at_utc <= dj_timezone.now():
+                return Response({"detail": "evento già passato"}, status=status.HTTP_400_BAD_REQUEST)
             if qty > available_qty:
                 return Response({"qty": f"exceeds listing qty ({available_qty} available)"},
                                 status=status.HTTP_400_BAD_REQUEST)
 
             unit_price = locked.price_each
-            subtotal = (unit_price * qty)
-
-            commission = Decimal("0.00")
-            if fee_percent is not None:
-                commission += (subtotal * Decimal(str(fee_percent)) / Decimal("100"))
-            if fee_flat is not None:
-                commission += Decimal(str(fee_flat))
-
-            commission = commission.quantize(Decimal("0.01"))
-            total = (subtotal + commission).quantize(Decimal("0.01"))
+            subtotal = (unit_price * qty).quantize(Decimal("0.01"))
+            pricing = _buyer_pricing(subtotal, perf, qty)
 
             order = OrderTicket.objects.create(
                 buyer=user,
                 listing=locked,
                 qty=qty,
                 unit_price=unit_price,
-                total_price=subtotal.quantize(Decimal("0.01")),
+                total_price=subtotal,
+                commission=pricing["commission"],
+                change_name_fee=pricing["change_name_fee"],
+                final_total=pricing["final_total"],
+                holder_names=data.get("holder_names") or None,
                 currency=locked.currency,
                 status="PENDING",
             )
 
-            remaining = locked.qty - qty
+            remaining = available_qty - qty
             if remaining > 0:
                 locked.qty = remaining
                 locked.save(update_fields=["qty", "updated_at"])
@@ -1470,9 +1632,6 @@ class CheckoutStartView(APIView):
                 locked.save(update_fields=["qty", "status", "updated_at"])
 
         out = OrderSummarySerializer(order).data
-        out["subtotal"] = str(subtotal.quantize(Decimal("0.01")))
-        out["commission"] = str(commission)
-        out["total"] = str(total)
         return Response(out, status=status.HTTP_201_CREATED)
 
 
@@ -1480,24 +1639,18 @@ class CheckoutSummaryView(generics.RetrieveAPIView):
     """
     GET /api/checkout/summary/{order_id}/
     Ritorna il riepilogo dell'ordine (serve per step 2 della UI).
-    - Se l'utente e' loggato: può vedere solo i propri ordini.
-    - Se anonimo: consenti solo se fornisce ?email=... che combacia (uso basilare).
+    Accesso: solo l'acquirente dell'ordine (o staff), autenticato.
     """
     serializer_class = OrderSummarySerializer
     queryset = OrderTicket.objects.select_related("buyer", "listing", "listing__performance").all()
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
         order = get_object_or_404(self.queryset, pk=self.kwargs["pk"])
         user = self.request.user
-        if user.is_authenticated and (user.is_staff or order.buyer_id == user.id):
+        if user.is_staff or order.buyer_id == user.id:
             return order
-        email = self.request.queryparams.get("email") if hasattr(self.request,
-                                                                 "queryparams") else self.request.query_params.get(
-            "email")
-        if email and order.buyer.email.lower() == email.lower():
-            return order
-        raise permissions.PermissionDenied("not allowed")
+        raise PermissionDenied("not allowed")
 
 
 class ResendOTPView(APIView):
@@ -1586,6 +1739,7 @@ class MyPurchasesView(generics.ListAPIView):
                 "listing__performance",
                 "listing__performance__evento",
                 "listing__performance__luogo",
+                "delivered_ticket",
             )
             .filter(buyer=self.request.user)
         )
@@ -1620,19 +1774,23 @@ class MyPurchasesView(generics.ListAPIView):
 
             has_ticket_file = False
             if o.status == "DELIVERED":
-                lt = (ListingTicket.objects
-                      .filter(listing=o.listing)
-                      .select_related("biglietto")
-                      .first())
-                if lt and lt.biglietto and lt.biglietto.path_file:
+                if o.delivered_ticket_id and o.delivered_ticket and o.delivered_ticket.path_file:
                     has_ticket_file = True
                 else:
-                    lsi = (ListingSubitem.objects
-                           .filter(listing=o.listing)
-                           .select_related("subitem__biglietto")
-                           .first())
-                    if lsi and lsi.subitem and lsi.subitem.biglietto and lsi.subitem.biglietto.path_file:
+                    # fallback legacy: consegne precedenti a delivered_ticket
+                    lt = (ListingTicket.objects
+                          .filter(listing=o.listing)
+                          .select_related("biglietto")
+                          .first())
+                    if lt and lt.biglietto and lt.biglietto.path_file:
                         has_ticket_file = True
+                    else:
+                        lsi = (ListingSubitem.objects
+                               .filter(listing=o.listing)
+                               .select_related("subitem__biglietto")
+                               .first())
+                        if lsi and lsi.subitem and lsi.subitem.biglietto and lsi.subitem.biglietto.path_file:
+                            has_ticket_file = True
 
             is_downloadable = o.status == "DELIVERED" and has_ticket_file
             # deadline calcolata dinamicamente: paid_at + 24h (nessun campo model extra)
@@ -1657,7 +1815,7 @@ class MyPurchasesView(generics.ListAPIView):
                 "venue": venue_name,
                 "performance_datetime": starts,
                 "qty": o.qty,
-                "price_total": str(o.total_price),
+                "price_total": str(o.final_total if o.final_total is not None else o.total_price),
                 "currency": o.currency,
                 "status": o.status,
                 "delivery_label": delivery_label,

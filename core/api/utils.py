@@ -17,10 +17,21 @@ def invia_email_venditore_vendita(order, deadline):
     seller = order.listing.seller
     buyer = order.buyer
     deadline_str = deadline.strftime("%d/%m/%Y %H:%M") if deadline else "entro 24 ore"
+
+    holder_names = [n for n in (getattr(order, "holder_names", None) or []) if n]
+    holders_block = ""
+    if holder_names:
+        holders_block = (
+            "Nuovi intestatari comunicati dall'acquirente (da riportare sul biglietto):\n"
+            + "\n".join(f"  {i}. {name}" for i, name in enumerate(holder_names, start=1))
+            + "\n\n"
+        )
+
     subject = "Il tuo biglietto è stato venduto – Tixy"
     message = (
         f"Ciao {seller.first_name},\n\n"
         f"Il tuo annuncio (ordine #{order.id}) è stato acquistato da {buyer.first_name} {buyer.last_name}.\n\n"
+        f"{holders_block}"
         f"Devi caricare il biglietto aggiornato (con nome intestatario e sigillo fiscale cambiati) "
         f"entro: {deadline_str}\n\n"
         f"Accedi alla tua area riservata > Le mie rivendite e usa il pulsante 'Carica biglietto' "
