@@ -522,6 +522,15 @@ class PerformanceSearchViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
         .all()
     )
 
+    def get_queryset(self):
+        """
+        Nella ricerca pubblica mostra soltanto performance non ancora trascorse.
+        Gli eventi passati restano memorizzati nel database.
+        """
+        return super().get_queryset().filter(
+            starts_at_utc__gte=dj_timezone.now()
+        )
+
 
 @api_view(["GET"])
 @permission_classes([permissions.AllowAny])
