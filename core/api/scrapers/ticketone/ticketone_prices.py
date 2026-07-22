@@ -99,7 +99,37 @@ def try_with_browser(url: str, verbose: bool = False, headless: bool = True) -> 
 # che una singola chiamata pulita funziona regolarmente.
 MAX_UNLOCKER_RETRIES = 3
 UNLOCKER_MIN_VALID_BYTES = 1000
-UNLOCKER_RETRY_BASE_WAIT = 4.0
+UNLOCKER_RETRY_BASE_WAIT = 8.0
+
+
+def _extract_jsonld_offer(html):
+    """Estrae prezzo minimo e disponibilita' dal JSON-LD MusicEvent di TicketOne.
+    Ritorna (min_price:str|None, availability:str|None) dove availability e'
+    'InStock' / 'SoldOut' / 'OutOfStock' / None. Fonte forte e stabile."""
+    import re as _re, json as _json
+    blocks = _re.findall(
+        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html, _re.DOTALL)
+    for b in blocks:
+        try:
+            data = _json.loads(b.strip())
+        except Exception:
+            continue
+        candidates = data if isinstance(data, list) else [data]
+        for node in candidates:
+            offers = node.get("offers") if isinstance(node, dict) else None
+            if not offers:
+                continue
+            offer_list = offers if isinstance(offers, list) else [offers]
+            for off in offer_list:
+                if not isinstance(off, dict):
+                    continue
+                avail = off.get("availability", "") or ""
+                avail_short = avail.rsplit("/", 1)[-1] if avail else None
+                price = off.get("lowPrice") or off.get("price")
+                if price is not None or avail_short:
+                    return (str(price) if price is not None else None, avail_short)
+    return (None, None)
 
 
 def try_with_unlocker(url: str, verbose: bool = False) -> Dict[str, Any]:
@@ -125,8 +155,8 @@ def try_with_unlocker(url: str, verbose: bool = False) -> Dict[str, Any]:
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
                 },
-                json={"zone": zone, "url": url, "format": "raw"},
-                timeout=60,
+                json={"zone": zone, "url": url, "format": "raw", "country": "it"},
+                timeout=120,
             )
         except Exception as exc:
             if verbose:
@@ -158,7 +188,20 @@ def try_with_unlocker(url: str, verbose: bool = False) -> Dict[str, Any]:
 
     seed_item = build_seed_item(url)
     detailed_item = parse_event_detail(html, seed_item)
-    return build_result(url, detailed_item, source_used="unlocker")
+    # Preferisci il JSON-LD (structured data, fonte forte e stabile) se presente
+    jl_price, jl_avail = _extract_jsonld_offer(html)
+    if jl_price and not detailed_item.price_text:
+        detailed_item.price_text = "%s EUR" % jl_price
+    result = build_result(url, detailed_item, source_used="unlocker")
+    if jl_avail:
+        result["jsonld_availability"] = jl_avail
+        if jl_avail == "InStock" and jl_price:
+            result["detail_status"] = "ok"
+            result["min_price"] = float(jl_price)
+            result["raw_price_text"] = "%s EUR" % jl_price
+        elif jl_avail in ("SoldOut", "OutOfStock"):
+            result["detail_status"] = "sold_out"
+    return result
 
 
 def get_ticketone_price_data(

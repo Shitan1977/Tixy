@@ -35,6 +35,7 @@ class TicketOneUnlockerClient:
                 "zone": BRIGHTDATA_ZONE,
                 "url": url,
                 "format": "raw",
+                "country": "it",
             },
             timeout=self.timeout,
         )
