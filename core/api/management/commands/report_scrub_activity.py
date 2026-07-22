@@ -103,6 +103,6 @@ class Command(BaseCommand):
         send_mail(
             subject=subject, message=body,
             from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-            recipient_list=[to_email], fail_silently=False,
+            recipient_list=[e.strip() for e in to_email.split(',') if e.strip()], fail_silently=False,
         )
         self.stdout.write(self.style.SUCCESS(f"[OK] report inviato a {to_email}"))
