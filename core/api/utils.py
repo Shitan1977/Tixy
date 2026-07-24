@@ -1,6 +1,6 @@
 from django.core.mail import send_mail
 
-FROM_EMAIL = "noreply@misteralert.it"
+FROM_EMAIL = "supporto@tixy.it"
 
 
 def invia_otp_email(user):
