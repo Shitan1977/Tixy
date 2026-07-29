@@ -405,5 +405,9 @@ TIXY_PENDING_ORDER_TTL_MINUTES = 30
 # Cambio nominativo: False = disattivato per i TEST (nessuna fee al checkout e
 # consegna consentita anche con lo stesso PDF originale, sigilli invariati).
 # Rimettere True prima di andare in produzione.
+TIXY_SELLER_UPLOAD_DEADLINE_HOURS = 12
+# Cambio nominativo: False = disattivato per i TEST (nessuna fee al checkout e
+# consegna consentita anche con lo stesso PDF originale, sigilli invariati).
+# Rimettere True prima di andare in produzione.
 TIXY_CHANGE_NAME_ENABLED = True
 
