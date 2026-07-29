@@ -299,10 +299,26 @@ class MonitoraggioSerializer(serializers.ModelSerializer):
 
 
 class NotificaSerializer(serializers.ModelSerializer):
+    # Nome evento affidabile, letto dal monitoraggio collegato (evento o
+    # performance) invece di provare a estrarlo dal testo libero di `message`
+    # (i vari comandi scan_* generano il messaggio con formati diversi, non
+    # tutti compatibili con un parsing testuale).
+    evento_nome = serializers.SerializerMethodField()
+
     class Meta:
         model = Notifica
         fields = "__all__"
         read_only_fields = ("sent_at",)
+
+    def get_evento_nome(self, obj):
+        mon = getattr(obj, "monitoraggio", None)
+        if not mon:
+            return None
+        if mon.evento_id:
+            return getattr(mon.evento, "nome_evento", None)
+        if mon.performance_id:
+            return getattr(getattr(mon.performance, "evento", None), "nome_evento", None)
+        return None
 
 
 class AlertTriggerSerializer(serializers.ModelSerializer):
@@ -328,8 +344,8 @@ class RecensioneSerializer(serializers.ModelSerializer):
     # 👇 campo con messaggi custom
     order = serializers.PrimaryKeyRelatedField(
         queryset=OrderTicket.objects.all(),
-        required=False,
-        allow_null=True,
+        required=True,
+        allow_null=False,
         error_messages={
             "does_not_exist": "numero d'ordine non corrispondente",
             "incorrect_type": "numero d'ordine non valido",
@@ -360,15 +376,17 @@ class RecensioneSerializer(serializers.ModelSerializer):
             if r < 1 or r > 5:
                 raise serializers.ValidationError({"rating": "rating must be 1..5"})
 
-        # se è stato inserito un ordine, deve combaciare con utente e venditore
+        # l'ordine deve combaciare con acquirente e venditore, ed essere
+        # DELIVERED: si può recensire solo dopo aver scaricato il biglietto
+        # (stesso segnale già usato dai frontend per mostrare "Scarica",
+        # vedi is_downloadable in MyPurchasesView/OrdersApi)
         if order:
             if order.buyer_id != (acquirente.id if acquirente else None):
                 raise serializers.ValidationError({"order": "numero d'ordine non corrispondente"})
             if venditore and order.listing.seller_id != venditore.id:
                 raise serializers.ValidationError({"order": "numero d'ordine non corrispondente"})
-            # (opzionale) consenti solo ordini conclusi:
-            # if order.status not in ("PAID", "DELIVERED"):
-            #     raise serializers.ValidationError({"order": "ordine non completato"})
+            if order.status != "DELIVERED":
+                raise serializers.ValidationError({"order": "puoi recensire solo dopo aver scaricato il biglietto"})
 
         return attrs
 
@@ -873,6 +891,9 @@ class MyPurchasesItemSerializer(serializers.Serializer):
     is_downloadable = serializers.BooleanField(default=False)
     seller_deadline = serializers.CharField(allow_null=True, default=None)
     download_api_url = serializers.CharField()
+    seller_id = serializers.IntegerField(allow_null=True, default=None)
+    seller_name = serializers.CharField(allow_blank=True, default="")
+    has_review = serializers.BooleanField(default=False)
 # --- 1A) Helper: calcolo hash per dedup file uguale ---
 def sha256_of_file(inmem_file) -> str:
     """
@@ -1058,6 +1079,9 @@ class TicketUploadReviewSerializer(serializers.ModelSerializer):
                     "page": row.get("page"),
                     "code_type": code_type or None,
                     "sigillo_fiscale": sigillo_fiscale,
+                    "settore": row.get("settore"),
+                    "fila": row.get("fila"),
+                    "posto": row.get("posto"),
                     "is_listed": code_hash in listed_hashes,
                     "is_sold": False,
                 }
@@ -1111,6 +1135,16 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
     # Stringa vuota = il biglietto non ha un titolare (scelta esplicita).
     holder_names = serializers.DictField(
         child=serializers.CharField(allow_blank=True, max_length=255), required=False
+    )
+    # Settore/fila/posto inseriti a mano dal venditore quando il parsing del
+    # PDF non li ha trovati (o per correggerli): {subitem_id: {settore, fila,
+    # posto}}. A differenza del nominativo, sono sempre opzionali: molti
+    # biglietti (prato, generici) non hanno legittimamente un posto assegnato.
+    seat_overrides = serializers.DictField(
+        child=serializers.DictField(
+            child=serializers.CharField(allow_blank=True, max_length=80), required=False
+        ),
+        required=False,
     )
 
     def _has_active_identifier_conflict(self, selected_code_hashes):
@@ -1192,6 +1226,8 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
         upload = validated_data["_upload"]
         user = self.context["request"].user
         holder_names = validated_data.get("holder_names") or {}
+        seat_overrides = validated_data.get("seat_overrides") or {}
+        seat_field_max_len = {"settore": 80, "fila": 40, "posto": 40}
 
         # Commissione venditore in vigore ora (server-side), storicizzata sull'annuncio
         is_top = validated_data.get("is_top", False)
@@ -1228,6 +1264,16 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 if name_override is not None:
                     item["full_name"] = name_override.strip() or None
 
+                # Settore/fila/posto: il parsing vince se ha già trovato un
+                # valore, l'override del venditore riempie solo ciò che manca.
+                item_seat_overrides = seat_overrides.get(str(item.get("id"))) or {}
+                for seat_field, max_len in seat_field_max_len.items():
+                    if item.get(seat_field):
+                        continue
+                    override_val = item_seat_overrides.get(seat_field)
+                    if override_val is not None:
+                        item[seat_field] = override_val.strip()[:max_len] or None
+
                 sbi, sbi_created = TicketSubitem.objects.select_for_update().get_or_create(
                     code_hash=code_hash,
                     defaults=dict(
@@ -1235,17 +1281,29 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                         full_name=item.get("full_name"),
                         price=item.get("price") or None,
                         page=item.get("page"),
+                        physical_page=item.get("physical_page"),
                         code_type=item.get("code_type"),
                         code_raw=raw_code,
+                        settore=item.get("settore"),
+                        fila=item.get("fila"),
+                        posto=item.get("posto"),
                     ),
                 )
                 if sbi.is_listed:
                     raise serializers.ValidationError("alcuni biglietti sono gia in vendita")
                 if sbi.is_sold:
                     raise serializers.ValidationError("alcuni biglietti risultano gia venduti")
-                if not sbi_created and name_override is not None:
-                    sbi.full_name = item.get("full_name")
-                    sbi.save(update_fields=["full_name"])
+                if not sbi_created:
+                    update_fields = []
+                    if name_override is not None:
+                        sbi.full_name = item.get("full_name")
+                        update_fields.append("full_name")
+                    for seat_field in seat_field_max_len:
+                        if item_seat_overrides.get(seat_field) is not None and not getattr(sbi, seat_field):
+                            setattr(sbi, seat_field, item.get(seat_field))
+                            update_fields.append(seat_field)
+                    if update_fields:
+                        sbi.save(update_fields=update_fields)
 
                 ListingSubitem.objects.create(listing=listing, subitem=sbi)
                 sbi.is_listed = True
@@ -1255,9 +1313,41 @@ class ListingCreateFromUploadSerializer(serializers.Serializer):
                 else:
                     sbi.save(update_fields=["is_listed"])
 
-            if holder_names:
+            if holder_names or seat_overrides:
                 # selected_items sono le stesse righe di upload.extracted_subitems
                 upload.save(update_fields=["extracted_subitems"])
+
+            # Se tutti i biglietti selezionati condividono lo stesso settore
+            # (e la stessa fila), valorizza il listing di conseguenza: sono
+            # campi già mostrati all'acquirente (checkout, pagina evento) ma
+            # finora mai scritti in questo flusso. Se eterogenei o assenti,
+            # restano None (nessun aggregato fuorviante).
+            settori = {item.get("settore") for item in selected_items if item.get("settore")}
+            file_uniche = {item.get("fila") for item in selected_items if item.get("fila")}
+            listing_update_fields = []
+            if len(settori) == 1:
+                listing.section = next(iter(settori))
+                listing_update_fields.append("section")
+            if len(file_uniche) == 1:
+                listing.row = next(iter(file_uniche))
+                listing_update_fields.append("row")
+
+            # "Posto" è testo libero (può essere "12", "A5", "Pit"...): lo
+            # trasformiamo in un range numerico (seat_from/seat_to, come già
+            # mostrato all'acquirente) solo quando OGNI posto valorizzato tra
+            # i biglietti selezionati è un numero puro — altrimenti un range
+            # sarebbe fuorviante, meglio lasciarlo assente.
+            posti_raw = [item.get("posto") for item in selected_items if item.get("posto")]
+            if posti_raw and all(str(p).strip().isdigit() for p in posti_raw):
+                posti_numerici = sorted(int(p) for p in posti_raw)
+                listing.seat_from = posti_numerici[0]
+                listing_update_fields.append("seat_from")
+                if posti_numerici[-1] != posti_numerici[0]:
+                    listing.seat_to = posti_numerici[-1]
+                    listing_update_fields.append("seat_to")
+
+            if listing_update_fields:
+                listing.save(update_fields=listing_update_fields)
 
         return {
             "listing_id": listing.id,
@@ -1527,7 +1617,9 @@ class MyResaleListItemSerializer(serializers.ModelSerializer):
             "order_status": getattr(order, "status", None),
             "purchase_date": _fmt_dt(getattr(order, "paid_at", None) or getattr(order, "created_at", None)),
             "sold_at": _fmt_dt(getattr(order, "delivered_at", None) or getattr(order, "paid_at", None) or getattr(order, "created_at", None)),
-            "seller_deadline": (getattr(order, "paid_at", None) + timedelta(hours=24)).isoformat() if getattr(order, "paid_at", None) and getattr(order, "status", None) == "PAID" else None,
+            "seller_deadline": (
+                getattr(order, "paid_at", None) + timedelta(hours=int(getattr(settings, "TIXY_SELLER_UPLOAD_DEADLINE_HOURS", 12)))
+            ).isoformat() if getattr(order, "paid_at", None) and getattr(order, "status", None) == "PAID" else None,
             "buyer_name": buyer_name,
             "holder_names": [n for n in (getattr(order, "holder_names", None) or []) if n],
             "sold_subitems": sold_subitems,

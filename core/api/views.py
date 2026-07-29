@@ -1,8 +1,15 @@
 from decimal import Decimal
+from io import BytesIO
 from uuid import uuid4
 from datetime import datetime, timedelta
 
+try:
+    import pikepdf
+except ImportError:
+    pikepdf = None
+
 from django.contrib.auth import get_user_model
+from django.conf import settings
 from django.core.exceptions import FieldError
 from rest_framework.exceptions import ValidationError
 from django.core.files.storage import default_storage
@@ -67,7 +74,7 @@ from .models import (
     UserProfile, Artista, Luoghi, Categoria, Evento, Performance,
     Piattaforma, EventoPiattaforma, Sconti, AlertPlan, Abbonamento, Monitoraggio,
     Notifica, Biglietto, Rivendita, Acquisto, Listing, ListingSubitem, ListingTicket,
-    OrderTicket, Recensione,
+    OrderTicket, Recensione, TicketSubitem,
     TicketUpload, SupportTicket, SupportMessage, SupportAttachment, EventFollow
 )
 
@@ -793,7 +800,9 @@ class MonitoraggioViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 
 
 class NotificaViewSet(SwaggerSafeQuerysetMixin, viewsets.ReadOnlyModelViewSet):
-    queryset = Notifica.objects.select_related("monitoraggio").all()
+    queryset = Notifica.objects.select_related(
+        "monitoraggio", "monitoraggio__evento", "monitoraggio__performance__evento",
+    ).all()
     serializer_class = NotificaSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1119,6 +1128,228 @@ class ListingViewSet(viewsets.ReadOnlyModelViewSet):
         }, status=status.HTTP_200_OK)
 
 
+def _try_instant_delivery(order, sold_subitems):
+    """
+    Consegna immediata del biglietto quando il cambio nominativo NON è
+    richiesto per l'ordine (evento a <24h dall'acquisto, change_name_fee=0,
+    vedi _buyer_pricing): il venditore non deve ricaricare nulla di suo, il
+    biglietto originale è già valido così com'è.
+
+    Gestisce SOLO il caso in cui l'ordine copre l'intero PDF caricato dal
+    venditore (un unico biglietto nel file, o tutti i suoi sub-biglietti
+    venduti in questo stesso ordine): in quel caso il file non contiene nulla
+    che non riguardi l'acquirente, quindi viene riusato così com'è.
+
+    Non gestisce l'acquisto parziale di un PDF multi-biglietto: per quel
+    caso, se il biglietto è "auto_delivery_eligible" (pagina fisica reale
+    nota per ogni sub-biglietto, vedi tasks.py:_map_rows_to_physical_pages),
+    subentra extract_pages_for_order qui sotto.
+
+    Ritorna il Biglietto da usare come delivered_ticket, oppure None se la
+    consegna immediata non è possibile in sicurezza.
+    """
+    if not sold_subitems:
+        return None
+
+    biglietto_ids = {s.biglietto_id for s in sold_subitems}
+    if len(biglietto_ids) != 1:
+        return None  # sub-biglietti da PDF diversi: caso non atteso, niente scorciatoie
+
+    original = sold_subitems[0].biglietto
+    if not original or not original.path_file:
+        return None
+
+    total_subitems = original.subitems.count()
+    if len(sold_subitems) < total_subitems:
+        return None  # acquisto parziale di un PDF multi-biglietto: nessuna estrazione affidabile, fallback manuale
+
+    # l'ordine copre l'intero PDF (o il PDF ha un solo biglietto):
+    # nessuna estrazione necessaria, il file originale non contiene altro
+    return original
+
+
+def available_page_groups(listing):
+    """
+    Raggruppa i sub-biglietti ancora invenduti del listing per pagina fisica
+    reale (TicketSubitem.physical_page). Ogni pagina va venduta per intero:
+    o tutti i suoi biglietti finiscono nello stesso ordine, o nessuno — così
+    l'estrazione di quella pagina (extract_pages_for_order) non condivide mai
+    dati di biglietti di altri acquirenti.
+
+    Usato dal checkout nelle ultime 24h per validare quali quantità sono
+    davvero acquistabili (vedi ANALISI_FLUSSI_ACQUISTO_RIVENDITA.md, sezione
+    8.4). I sub-biglietti il cui Biglietto non è auto_delivery_eligible (o
+    senza physical_page noto) non formano un gruppo valido e vengono esclusi.
+
+    Ritorna una lista di gruppi:
+    [{"biglietto_id": int, "physical_page": int, "subitem_ids": [...]}, ...]
+    """
+    unsold = (
+        listing.subitems
+        .select_related("subitem", "subitem__biglietto")
+        .filter(subitem__is_sold=False)
+    )
+    groups = {}
+    for lsi in unsold:
+        s = lsi.subitem
+        big = s.biglietto
+        if not big or not big.auto_delivery_eligible or s.physical_page is None:
+            continue
+        key = (big.id, s.physical_page)
+        groups.setdefault(key, []).append(s.id)
+
+    # esclude i gruppi "contaminati": pagine su cui esiste (o è esistito) un
+    # biglietto non incluso nel gruppo corrente, cioè già venduto altrove in
+    # passato — extract_pages_for_order rifiuterebbe comunque l'estrazione a
+    # valle (stessa invariante, vedi sopra), meglio non promettere qui una
+    # quantità che non potrà mai risultare in consegna immediata.
+    valid_groups = []
+    for (biglietto_id, page), ids in groups.items():
+        total_on_page = TicketSubitem.objects.filter(biglietto_id=biglietto_id, physical_page=page).count()
+        if total_on_page != len(ids):
+            continue
+        valid_groups.append({"biglietto_id": biglietto_id, "physical_page": page, "subitem_ids": ids})
+    return valid_groups
+
+
+def _select_subitems_for_order(unsold_relations, qty):
+    """
+    Sceglie quali ListingSubitem assegnare a un ordine di `qty` biglietti,
+    privilegiando il consumo di gruppi di pagina fisica completi (stesso
+    Biglietto + stesso physical_page) quando possibile, così la consegna
+    automatica <24h (extract_pages_for_order) trova sempre una selezione
+    pulita da estrarre. CheckoutStartView ha già validato che `qty` sia
+    raggiungibile per gruppi completi quando richiesto: qui si applica solo
+    un ordinamento che li rispetta, senza mai rifiutare nulla — se per
+    qualunque motivo (race, dati incompleti) non si riesce a comporre `qty`
+    solo con gruppi interi, si completa con i restanti in ordine, e la
+    consegna istantanea semplicemente non scatterà per questo ordine
+    (fallback sicuro al flusso manuale, invariato).
+    """
+    groups = {}
+    ungrouped = []
+    for lsi in unsold_relations:
+        s = lsi.subitem
+        big = getattr(s, "biglietto", None)
+        if big and getattr(big, "auto_delivery_eligible", False) and s.physical_page is not None:
+            groups.setdefault((big.id, s.physical_page), []).append(lsi)
+        else:
+            ungrouped.append(lsi)
+
+    selected = []
+    remaining = qty
+    for key in sorted(groups.keys(), key=lambda k: -len(groups[k])):
+        members = groups[key]
+        if len(members) <= remaining:
+            selected.extend(members)
+            remaining -= len(members)
+            del groups[key]
+
+    leftover = sorted(
+        [lsi for members in groups.values() for lsi in members] + ungrouped,
+        key=lambda lsi: (lsi.subitem_id, lsi.id),
+    )
+    selected.extend(leftover[:remaining])
+    return selected
+
+
+def _qty_achievable_from_groups(qty: int, group_sizes: list) -> bool:
+    """True se `qty` è ottenibile come somma di un sottoinsieme di group_sizes
+    (subset-sum): usato per validare in checkout che la quantità richiesta
+    nelle ultime 24h non spezzi un gruppo di pagina (vedi available_page_groups)."""
+    if qty <= 0:
+        return False
+    reachable = {0}
+    for size in group_sizes:
+        reachable |= {r + size for r in reachable if r + size <= qty}
+    return qty in reachable
+
+
+def extract_pages_for_order(order, sold_subitems):
+    """
+    Consegna immediata di un gruppo di pagina completo da un PDF
+    multi-biglietto, per il caso che _try_instant_delivery non gestisce
+    (acquisto parziale del PDF). Estrae con pikepdf solo le pagine fisiche
+    vendute in QUESTO ordine.
+
+    Applica l'invariante di sicurezza "pagina non contaminata" (vedi
+    ANALISI_FLUSSI_ACQUISTO_RIVENDITA.md sezione 8.3): una pagina è idonea
+    solo se OGNI sub-biglietto mai esistito su quella pagina fisica, per
+    quel Biglietto, risulta non venduto (e quindi parte di questo stesso
+    ordine) o già venduto come parte di QUESTO ordine. Se anche un solo
+    biglietto della pagina è stato venduto in un ordine diverso — anche in
+    passato, con il flusso manuale — l'estrazione è rifiutata: quella pagina
+    conterrebbe anche il biglietto originale (non rinominato) di un'altra
+    persona.
+
+    Ritorna il Biglietto "ritagliato" da usare come delivered_ticket, oppure
+    None se non è possibile consegnare subito in sicurezza (fallback al
+    flusso manuale).
+    """
+    if not sold_subitems or pikepdf is None:
+        return None
+
+    biglietto_ids = {s.biglietto_id for s in sold_subitems}
+    if len(biglietto_ids) != 1:
+        return None
+
+    original = sold_subitems[0].biglietto
+    if not original or not original.path_file or not original.auto_delivery_eligible:
+        return None
+
+    pages = {s.physical_page for s in sold_subitems}
+    if not pages or None in pages:
+        return None  # pagina non nota: fallback manuale
+
+    # invariante "pagina non contaminata": ogni sub-biglietto mai esistito su
+    # queste pagine deve essere o invenduto (quindi parte di questo ordine)
+    # o già venduto come parte di QUESTO ordine
+    sold_ids = {s.id for s in sold_subitems}
+    everyone_on_pages = TicketSubitem.objects.filter(biglietto=original, physical_page__in=pages)
+    for sub in everyone_on_pages:
+        if sub.id not in sold_ids:
+            return None  # invenduto ma non incluso in questo ordine, o venduto altrove: fallback manuale
+
+    try:
+        with default_storage.open(original.path_file.name, "rb") as f:
+            source_bytes = f.read()
+        with pikepdf.open(BytesIO(source_bytes)) as src:
+            total_pages = len(src.pages)
+            if any(p < 0 or p >= total_pages for p in pages):
+                return None
+            new_pdf = pikepdf.Pdf.new()
+            for p in sorted(pages):
+                new_pdf.pages.append(src.pages[p])
+            # niente metadati/riferimenti al documento multi-biglietto originale
+            for key in list(new_pdf.docinfo.keys()):
+                del new_pdf.docinfo[key]
+            buf = BytesIO()
+            new_pdf.save(buf)
+            reduced_bytes = buf.getvalue()
+    except Exception:
+        return None
+
+    import hashlib as _hashlib
+    from django.core.files.base import ContentFile as _CF
+
+    new_hash = _hashlib.sha256(reduced_bytes).hexdigest()
+    saved_path = default_storage.save(f"delivery/order_{order.id}_{new_hash[:12]}.pdf", _CF(reduced_bytes))
+
+    biglietto = Biglietto(
+        nome_file=f"biglietto_ordine_{order.id}.pdf",
+        hash_file=new_hash,
+        mime_type="application/pdf",
+        file_size=len(reduced_bytes),
+        evento_id=original.evento_id,
+        performance_id=original.performance_id,
+        is_valid=True,
+        source_upload=original,
+    )
+    biglietto.path_file.name = saved_path
+    biglietto.save()
+    return biglietto
+
+
 # ---------------------------
 # ORDERS (creazione atomica, riserva qty)
 # ---------------------------
@@ -1201,7 +1432,9 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
         """
         POST /api/orders/{id}/confirm-payment/
         Segna l'ordine come PAID e i TicketSubitem come is_sold.
-        Il venditore ha 24h (da paid_at) per caricare il biglietto aggiornato.
+        Il venditore ha TIXY_SELLER_UPLOAD_DEADLINE_HOURS ore (da paid_at) per
+        caricare il biglietto aggiornato, altrimenti l'ordine viene annullato
+        automaticamente dal command expire_orders.
         """
         order = self.get_object()
 
@@ -1226,7 +1459,7 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             listing = Listing.objects.select_for_update().get(pk=order.listing_id)
             unsold_relations = list(
                 listing.subitems
-                .select_related("subitem")
+                .select_related("subitem", "subitem__biglietto")
                 .filter(subitem__is_sold=False)
                 .order_by("subitem_id", "id")
             )
@@ -1243,22 +1476,77 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             order.paid_at = now_ts
             order.save(update_fields=["status", "paid_at"])
 
-            to_sell = unsold_relations[: int(order.qty or 0)]
+            to_sell = _select_subitems_for_order(unsold_relations, int(order.qty or 0))
             for lsi in to_sell:
                 lsi.subitem.is_sold = True
+                # traccia quale ordine ha "preso" questo subitem, per poterlo
+                # liberare di nuovo se l'ordine viene annullato/rimborsato
+                lsi.subitem.sold_order = order
                 if hasattr(lsi.subitem, "sold_at"):
                     lsi.subitem.sold_at = now_ts
-                    lsi.subitem.save(update_fields=["is_sold", "sold_at"])
+                    lsi.subitem.save(update_fields=["is_sold", "sold_order", "sold_at"])
                 else:
-                    lsi.subitem.save(update_fields=["is_sold"])
+                    lsi.subitem.save(update_fields=["is_sold", "sold_order"])
 
             remaining_unsold = listing.subitems.filter(subitem__is_sold=False).count()
             listing.qty = remaining_unsold
             listing.status = "ACTIVE" if remaining_unsold > 0 else "SOLD"
             listing.save(update_fields=["qty", "status", "updated_at"])
 
-        # deadline calcolata dinamicamente: paid_at + 24h
-        deadline = now_ts + timedelta(hours=24)
+        # --- Consegna automatica istantanea se il cambio nominativo non era
+        # richiesto per questo ordine (evento a <24h dall'acquisto, fee=0,
+        # vedi _buyer_pricing): il venditore non deve ricaricare nulla.
+        name_change_needed = (
+            bool(getattr(settings, "TIXY_CHANGE_NAME_ENABLED", True))
+            and Decimal(order.change_name_fee or 0) > 0
+        )
+        delivered_biglietto = None
+        if not name_change_needed:
+            sold_subitems = [lsi.subitem for lsi in to_sell]
+            try:
+                delivered_biglietto = _try_instant_delivery(order, sold_subitems)
+            except Exception:
+                delivered_biglietto = None
+            if delivered_biglietto is None:
+                # caso PDF multi-biglietto acquistato solo in parte: prova
+                # comunque l'estrazione del gruppo di pagina (vedi 8.3-8.4)
+                try:
+                    delivered_biglietto = extract_pages_for_order(order, sold_subitems)
+                except Exception:
+                    delivered_biglietto = None
+
+        if delivered_biglietto is not None:
+            order.delivered_ticket = delivered_biglietto
+            order.status = "DELIVERED"
+            order.delivered_at = now_ts
+            order.save(update_fields=["delivered_ticket", "status", "delivered_at"])
+
+            try:
+                invia_email_acquirente_consegna(order)
+            except Exception:
+                pass
+            notify_user_push(
+                order.buyer,
+                "Il tuo biglietto è pronto 🎫",
+                f"Ordine #{order.id}: consegna immediata (nessun cambio nominativo richiesto). Scaricalo da \"I miei biglietti\".",
+                {"type": "order_delivered", "order_id": order.id},
+            )
+            notify_user_push(
+                order.listing.seller,
+                "Vendita completata",
+                f"Ordine #{order.id}: consegnato automaticamente, nessuna azione richiesta da parte tua.",
+                {"type": "order_auto_delivered", "order_id": order.id},
+            )
+            return Response({
+                "detail": "confirmed and delivered",
+                "order_id": order.id,
+                "status": order.status,
+            }, status=200)
+
+        # --- Consegna manuale: il venditore deve caricare il biglietto rinominato ---
+        # deadline calcolata dinamicamente: paid_at + TIXY_SELLER_UPLOAD_DEADLINE_HOURS
+        deadline_hours = int(getattr(settings, "TIXY_SELLER_UPLOAD_DEADLINE_HOURS", 12))
+        deadline = now_ts + timedelta(hours=deadline_hours)
         try:
             invia_email_venditore_vendita(order, deadline)
         except Exception:
@@ -1268,10 +1556,10 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
             push_body = (
                 f"Ordine #{order.id}: nuovo intestatario {holder_names[0]}"
                 + (f" (+{len(holder_names) - 1})" if len(holder_names) > 1 else "")
-                + ". Carica il biglietto aggiornato entro 24 ore."
+                + f". Carica il biglietto aggiornato entro {deadline_hours} ore."
             )
         else:
-            push_body = f"Ordine #{order.id}: carica il biglietto aggiornato entro 24 ore dalla sezione Rivendite."
+            push_body = f"Ordine #{order.id}: carica il biglietto aggiornato entro {deadline_hours} ore dalla sezione Rivendite."
         notify_user_push(
             order.listing.seller,
             "Biglietto venduto! 🎉",
@@ -1613,6 +1901,32 @@ class CheckoutStartView(APIView):
                 return Response({"qty": f"exceeds listing qty ({available_qty} available)"},
                                 status=status.HTTP_400_BAD_REQUEST)
 
+            # Nelle ultime 24h (change_name_fee=0) l'acquisto è vincolato ai
+            # gruppi di pagina fisica del PDF, per garantire che la consegna
+            # automatica non condivida mai dati di altri biglietti sulla
+            # stessa pagina (vedi ANALISI_FLUSSI_ACQUISTO_RIVENDITA.md, 8.4).
+            name_change_would_apply = (
+                bool(getattr(settings, "TIXY_CHANGE_NAME_ENABLED", True))
+                and perf and perf.starts_at_utc
+                and (perf.starts_at_utc - dj_timezone.now()) >= timedelta(hours=24)
+            )
+            if not name_change_would_apply and available_qty > 0:
+                groups = available_page_groups(locked)
+                group_sizes = [len(g["subitem_ids"]) for g in groups]
+                if sum(group_sizes) == available_qty:
+                    if not _qty_achievable_from_groups(qty, group_sizes):
+                        return Response(
+                            {"qty": "nelle ultime 24h puoi acquistare solo blocchi interi di biglietti "
+                                    "che condividono la stessa pagina del PDF originale"},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                elif qty != available_qty:
+                    return Response(
+                        {"qty": "nelle ultime 24h per questo annuncio puoi acquistare solo "
+                                "tutti i biglietti disponibili in blocco"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
             unit_price = locked.price_each
             subtotal = (unit_price * qty).quantize(Decimal("0.01"))
             pricing = _buyer_pricing(subtotal, perf, qty)
@@ -1745,6 +2059,7 @@ class MyPurchasesView(generics.ListAPIView):
             OrderTicket.objects
             .select_related(
                 "listing",
+                "listing__seller",
                 "listing__performance",
                 "listing__performance__evento",
                 "listing__performance__luogo",
@@ -1772,6 +2087,12 @@ class MyPurchasesView(generics.ListAPIView):
     def list(self, request, *args, **kwargs):
         qs = self.get_queryset()
         page = self.paginate_queryset(qs)
+
+        reviewed_order_ids = set(
+            Recensione.objects
+            .filter(acquirente=request.user, order__in=[o.id for o in (page or qs)])
+            .values_list("order_id", flat=True)
+        )
 
         def map_row(o):
             perf = getattr(o.listing, "performance", None)
@@ -1802,8 +2123,9 @@ class MyPurchasesView(generics.ListAPIView):
                             has_ticket_file = True
 
             is_downloadable = o.status == "DELIVERED" and has_ticket_file
-            # deadline calcolata dinamicamente: paid_at + 24h (nessun campo model extra)
-            deadline_iso = (o.paid_at + timedelta(hours=24)).isoformat() if o.paid_at and o.status == "PAID" else None
+            # deadline calcolata dinamicamente: paid_at + TIXY_SELLER_UPLOAD_DEADLINE_HOURS
+            _upload_deadline_h = int(getattr(settings, "TIXY_SELLER_UPLOAD_DEADLINE_HOURS", 12))
+            deadline_iso = (o.paid_at + timedelta(hours=_upload_deadline_h)).isoformat() if o.paid_at and o.status == "PAID" else None
 
             # Label descrittiva per il buyer
             if o.status == "DELIVERED" and has_ticket_file:
@@ -1816,6 +2138,11 @@ class MyPurchasesView(generics.ListAPIView):
                 delivery_label = "Pagamento in corso"
             else:
                 delivery_label = o.status
+
+            seller = getattr(o.listing, "seller", None)
+            seller_name = ""
+            if seller:
+                seller_name = f"{seller.first_name or ''} {seller.last_name or ''}".strip() or (seller.email or "")
 
             return {
                 "id": o.id,
@@ -1831,6 +2158,9 @@ class MyPurchasesView(generics.ListAPIView):
                 "is_downloadable": is_downloadable,
                 "seller_deadline": deadline_iso,
                 "download_api_url": f"/api/orders/{o.id}/download/",
+                "seller_id": getattr(seller, "id", None),
+                "seller_name": seller_name,
+                "has_review": o.id in reviewed_order_ids,
             }
 
         data = [map_row(x) for x in (page or qs)]

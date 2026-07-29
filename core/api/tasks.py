@@ -441,6 +441,93 @@ def _extract_ticket_codes(section_text: str) -> Dict[str, Any]:
     }
 
 
+# Valori-segnaposto non informativi: se una regex li cattura come "posto" non
+# vanno mostrati come un dato trovato (es. "Posto: unico" non è un posto reale).
+_SEAT_PLACEHOLDER_VALUES = {"unico", "libero", "generico", "n/d", "n.d.", "nd", "-"}
+
+# Nomi di settore/area comuni sui biglietti (posti in piedi/prato o categorie
+# a prezzo fisso) che spesso compaiono SENZA un'etichetta esplicita "Settore:"
+# davanti — es. "PIT 1", "PARTERRE", "GOLD CIRCLE" stampati da soli sul
+# biglietto. Usato come fallback quando l'etichetta esplicita non c'è.
+# Elenco non esaustivo (varia per provider/organizzatore): estendere se si
+# incontrano altri formati reali.
+_SETTORE_CATEGORY_WORDS = [
+    "gold circle", "silver circle", "platinum circle", "general admission",
+    "poltronissima", "poltrona", "balconata", "gradinata", "parterre",
+    "tribuna", "platea", "galleria", "anello", "prato", "distinti", "curva",
+    "pit", "vip",
+]
+# Parole che, se catturate come "qualificatore" dopo la keyword (es. "PIT
+# Prezzo"), non sono in realtà parte del nome del settore.
+_SETTORE_QUALIFIER_STOPWORDS = {
+    "euro", "prezzo", "data", "ore", "via", "il", "la", "un", "una",
+    "sigillo", "codice", "evento", "luogo", "biglietto",
+}
+_SETTORE_CATEGORY_PATTERN = "|".join(
+    re.escape(w) for w in sorted(_SETTORE_CATEGORY_WORDS, key=len, reverse=True)
+)
+
+
+def _extract_settore_from_category_word(section_text: str):
+    """
+    Fallback quando non c'è un'etichetta "Settore:" esplicita: cerca un nome
+    di area/categoria noto (vedi _SETTORE_CATEGORY_WORDS), con un eventuale
+    qualificatore breve subito dopo (es. "PIT 1", "PRATO A"). Meno affidabile
+    dell'etichetta esplicita — per questo resta sempre modificabile in
+    revisione — ma copre i biglietti prato/general admission che non hanno
+    mai un campo "Settore:" dedicato, solo il nome dell'area stampato.
+    """
+    m = re.search(
+        rf"\b({_SETTORE_CATEGORY_PATTERN})\b(?:\s+([A-Za-z0-9]{{1,10}}))?",
+        section_text,
+        re.I,
+    )
+    if not m:
+        return None
+    category = _normalize_spaces(m.group(1))
+    qualifier = _normalize_spaces(m.group(2) or "")
+    if qualifier and qualifier.lower() in _SETTORE_QUALIFIER_STOPWORDS:
+        qualifier = ""
+    value = f"{category} {qualifier}".strip() if qualifier else category
+    return value or None
+
+
+def _extract_seat_info(section_text: str) -> Dict[str, Any]:
+    """
+    Prova a trovare settore/fila/posto nel testo di UN biglietto (sezione).
+    Per settore, prova prima un'etichetta esplicita ("Settore: ..."), poi —
+    se assente — un nome di area/categoria noto senza etichetta (es. "PIT 1",
+    "PARTERRE", "GOLD CIRCLE"), tipico dei biglietti prato/general admission
+    che non hanno mai fila/posto assegnati. Fila e posto restano invece
+    riconosciuti solo con etichetta esplicita: un numero isolato nel testo
+    senza contesto è troppo ambiguo per essere affidabile. Regex volutamente
+    conservative per minimizzare i falsi positivi: è preferibile non trovare
+    il dato (l'utente lo aggiunge/corregge a mano in revisione) piuttosto che
+    mostrarne uno sbagliato. Scritte senza PDF reali di test disponibili in
+    questo momento: vanno validate contro campioni reali (TicketOne,
+    Vivaticket, Ticketmaster, FanSale — formati già noti per differire nel
+    resto di questo file) appena disponibili.
+    """
+    boundary = r"(?=\s*(?:Settore|Fila|Posto|Prezzo|Data|Evento|Luogo|Sigillo|Codice)\s*:|\n|$)"
+
+    def _match(label: str, char_class: str, max_len: int):
+        m = re.search(rf"{label}\s*:\s*({char_class}{{1,{max_len}}}?){boundary}", section_text, re.I)
+        if not m:
+            return None
+        value = _normalize_spaces(m.group(1))
+        if not value or value.lower() in _SEAT_PLACEHOLDER_VALUES:
+            return None
+        return value
+
+    settore = _match("Settore", r"[A-Za-zÀ-ÿ0-9 .'\-]", 40) or _extract_settore_from_category_word(section_text)
+
+    return {
+        "settore": settore,
+        "fila": _match("Fila", r"[A-Za-z0-9]", 10),
+        "posto": _match("Posto", r"[A-Za-z0-9]", 10),
+    }
+
+
 def _build_ticket_rows(text: str) -> List[Dict[str, Any]]:
     sections = _extract_ticket_sections(text)
     rows = []
@@ -451,6 +538,7 @@ def _build_ticket_rows(text: str) -> List[Dict[str, Any]]:
         code_data = _extract_ticket_codes(section)
         section_names = _extract_names(section)
         section_prices = _extract_prices(section)
+        seat_data = _extract_seat_info(section)
         raw_code = (
             code_data["sigillo"]
             or code_data["ticket_id"]
@@ -476,6 +564,9 @@ def _build_ticket_rows(text: str) -> List[Dict[str, Any]]:
                 "barcode": code_data.get("barcode"),
                 "full_name": (section_names or fallback_names or [None])[0],
                 "price": (section_prices or fallback_prices or [None])[0],
+                "settore": seat_data.get("settore"),
+                "fila": seat_data.get("fila"),
+                "posto": seat_data.get("posto"),
             }
         )
 
@@ -501,11 +592,15 @@ def _serialize_subitems_for_upload(rows: List[Dict[str, Any]], codes: List[Dict[
             {
                 "id": len(temp_rows) + 1,
                 "page": row.get("page"),
+                "physical_page": row.get("physical_page"),
                 "code_type": row.get("code_type") or "CODE",
                 "code_raw": raw,
                 "code_hash": code_hash,
                 "full_name": row.get("full_name"),
                 "price": str(row.get("price")) if row.get("price") is not None else None,
+                "settore": row.get("settore"),
+                "fila": row.get("fila"),
+                "posto": row.get("posto"),
             }
         )
 
@@ -529,10 +624,60 @@ def _serialize_subitems_for_upload(rows: List[Dict[str, Any]], codes: List[Dict[
                 "code_hash": code_hash,
                 "full_name": None,
                 "price": None,
+                "settore": None,
+                "fila": None,
+                "posto": None,
             }
         )
 
     return temp_rows
+
+
+def _map_rows_to_physical_pages(ticket_rows: List[Dict[str, Any]], codes: List[Dict[str, Any]]):
+    """
+    Associa a ogni riga di `ticket_rows` (biglietti riconosciuti nel testo) la
+    pagina fisica reale (0-based) su cui si trova, usando i codici QR/barcode
+    scansionati (`codes`, da _scan_qr_barcodes: {"page": 1-based, "code_raw"}).
+    Un QR/barcode è per costruzione stampato su una pagina fisica precisa —
+    a differenza di `row["page"]`, che è solo un contatore di sezioni di
+    testo riconosciute nel documento concatenato (vedi `_build_ticket_rows`),
+    non un vero indice di pagina.
+
+    Ritorna (rows_con_pagina, eligible): rows_con_pagina ha lo stesso
+    contenuto di ticket_rows più la chiave "physical_page" (None se non
+    determinata con certezza). eligible=True solo se OGNI riga ha trovato
+    esattamente una pagina, senza ambiguità (nessuna corrispondenza, o lo
+    stesso codice associato a più pagine diverse).
+    """
+    if not ticket_rows or not codes:
+        return [{**row, "physical_page": None} for row in ticket_rows], False
+
+    def _norm(v):
+        return (v or "").strip().lower()
+
+    rows_out = []
+    all_mapped = True
+    for row in ticket_rows:
+        candidates = {
+            _norm(row.get(key)) for key in ("code_raw", "sigillo", "ticket_id", "et_code", "barcode")
+            if row.get(key)
+        }
+        candidates.discard("")
+        matched_pages = set()
+        for code in codes:
+            code_raw = _norm(code.get("code_raw"))
+            if not code_raw or code.get("page") is None:
+                continue
+            if any(cand == code_raw or cand in code_raw or code_raw in cand for cand in candidates):
+                matched_pages.add(int(code["page"]) - 1)  # 0-based
+        if len(matched_pages) == 1:
+            rows_out.append({**row, "physical_page": matched_pages.pop()})
+        else:
+            # nessuna corrispondenza, o codice trovato su più pagine: non affidabile
+            rows_out.append({**row, "physical_page": None})
+            all_mapped = False
+
+    return rows_out, all_mapped
 
 
 def _codes_mismatch(ticket_rows: List[Dict[str, Any]], codes: List[Dict[str, Any]]) -> bool:
@@ -764,6 +909,13 @@ def parse_ticket_pdf(self, upload_id: int):
                 "i codici QR/barcode non corrispondono ai dati del biglietto: il PDF potrebbe essere stato modificato"
             )
 
+        # Mappatura pagina fisica reale (per la consegna automatica <24h di
+        # PDF multi-biglietto, vedi ANALISI_FLUSSI_ACQUISTO_RIVENDITA.md
+        # sezione 8): richiede la scansione QR/barcode per pagina, quindi è
+        # "best effort" — se non disponibile o ambigua, auto_delivery_eligible
+        # resta False e il biglietto segue solo il flusso di consegna manuale.
+        ticket_rows, page_mapping_eligible = _map_rows_to_physical_pages(ticket_rows, codes)
+
         # Controllo di coerenza: se l'utente ha selezionato un evento, deve
         # corrispondere a quello che risulta dal biglietto (nome e/o data).
         if selected_perf is not None and full_text.strip():
@@ -820,6 +972,7 @@ def parse_ticket_pdf(self, upload_id: int):
 
             big.tickets_found = total
             big.is_valid = bool(total and perf)
+            big.auto_delivery_eligible = bool(page_mapping_eligible and total > 0)
             big.save()
 
             upload.found_count = total

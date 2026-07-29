@@ -631,6 +631,19 @@ class Biglietto(models.Model):
     evento = models.ForeignKey(Evento, on_delete=models.SET_NULL, null=True, blank=True, related_name="biglietti")
     performance = models.ForeignKey(Performance, on_delete=models.SET_NULL, null=True, blank=True, related_name="biglietti")
 
+    # True solo se il parsing per-pagina ha potuto mappare con certezza ogni
+    # biglietto riconosciuto a una singola pagina fisica del PDF (nessuna
+    # sezione a cavallo di più pagine, nessuna ambiguità). Condizione
+    # necessaria per la consegna automatica <24h di un PDF multi-biglietto
+    # (vedi ANALISI_FLUSSI_ACQUISTO_RIVENDITA.md sezione 8.2).
+    auto_delivery_eligible = models.BooleanField(default=False)
+    # Per audit: se questo Biglietto è un file "ritagliato" generato per la
+    # consegna automatica di un ordine, punta al Biglietto originale caricato
+    # dal venditore da cui è stato estratto.
+    source_upload = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="derived_files",
+    )
+
     is_valid = models.BooleanField(default=False)
     creato_il = models.DateTimeField(auto_now_add=True)
     aggiornato_il = models.DateTimeField(auto_now=True)
@@ -669,6 +682,13 @@ class TicketSubitem(models.Model):
     full_name = models.CharField(max_length=255, blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     page = models.IntegerField(blank=True, null=True)
+    # Indice di pagina fisica reale (0-based) nel PDF originale, calcolato
+    # durante il parsing per-pagina (vedi tasks.py:_build_ticket_rows_with_pages).
+    # A differenza di `page` (contatore di sezioni riconosciute nel testo,
+    # non affidabile per isolare una pagina), questo è l'indice restituito
+    # da una libreria PDF: usato per la consegna automatica <24h quando un
+    # PDF multi-biglietto va tagliato a una sola pagina/gruppo di pagina.
+    physical_page = models.IntegerField(blank=True, null=True)
 
     code_type = models.CharField(max_length=20, blank=True, null=True)   # es: QR/EAN/...
     code_raw = models.TextField(blank=True, null=True)
@@ -682,6 +702,13 @@ class TicketSubitem(models.Model):
 
     is_listed = models.BooleanField(default=False, db_index=True)
     is_sold = models.BooleanField(default=False, db_index=True)
+    # Ordine per cui questo subitem è stato marcato is_sold=True: permette di
+    # liberarlo di nuovo (is_sold=False) se l'ordine viene annullato/rimborsato
+    # (es. venditore che non consegna il biglietto rinominato entro la scadenza).
+    sold_order = models.ForeignKey(
+        "OrderTicket", on_delete=models.SET_NULL, blank=True, null=True,
+        related_name="claimed_subitems",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
