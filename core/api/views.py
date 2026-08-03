@@ -410,9 +410,20 @@ class RegisterPushTokenView(APIView):
         return Response({"success": True, "device_id": device.id})
 
     def delete(self, request):
-        """Disattiva tutti i device dell'utente al logout."""
+        """
+        Disattiva il device che sta facendo logout. Se il client invia il
+        proprio `push_token`, disattiva SOLO quel device (un utente loggato
+        su più telefoni non deve perdere le notifiche sugli altri quando fa
+        logout da uno solo). Se non viene inviato alcun token (client meno
+        recenti), ricade sul vecchio comportamento — disattiva tutti i device
+        dell'utente — per compatibilità.
+        """
         from .models import PushDevice
-        PushDevice.objects.filter(utente=request.user, is_active=True).update(is_active=False)
+        token = (request.data.get("push_token") or "").strip()
+        qs = PushDevice.objects.filter(utente=request.user, is_active=True)
+        if token:
+            qs = qs.filter(token=token)
+        qs.update(is_active=False)
         return Response({"success": True})
 
 
@@ -1649,15 +1660,17 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
 
         delivery_rows = _build_ticket_rows(delivery_text)
 
-        # --- Il PDF consegnato deve contenere almeno tanti biglietti quanti
-        # ne ha acquistati l'acquirente: un PDF con meno biglietti rilevati
-        # dell'ordine non copre tutta la vendita (es. ordine da 3, PDF con 1). ---
+        # --- Il PDF consegnato deve contenere esattamente tanti biglietti
+        # quanti ne ha acquistati l'acquirente: né meno (non coprirebbe tutta
+        # la vendita, es. ordine da 3, PDF con 1) né più (il file intero
+        # diventa order.delivered_ticket così com'è: un PDF con biglietti in
+        # eccesso consegnerebbe anche dati di altre persone). ---
         ordered_qty = int(order.qty or 0)
-        if delivery_rows and len(delivery_rows) < ordered_qty:
+        if delivery_rows and len(delivery_rows) != ordered_qty:
             return Response(
-                {"detail": f"il PDF caricato contiene solo {len(delivery_rows)} bigliett{'o' if len(delivery_rows) == 1 else 'i'} "
+                {"detail": f"il PDF caricato contiene {len(delivery_rows)} bigliett{'o' if len(delivery_rows) == 1 else 'i'} "
                            f"rilevat{'o' if len(delivery_rows) == 1 else 'i'}, ma l'ordine è di {ordered_qty}: "
-                           f"carica un PDF che contenga tutti i biglietti acquistati"},
+                           f"carica un PDF che contenga esattamente i biglietti acquistati, non di più né di meno"},
                 status=400,
             )
 
@@ -1695,6 +1708,24 @@ class OrderTicketViewSet(SwaggerSafeQuerysetMixin, viewsets.ModelViewSet):
                 {"detail": "Questo PDF è identico a un biglietto già presente: carica il biglietto AGGIORNATO con il nuovo nominativo"},
                 status=400,
             )
+
+        # --- Controllo nominativo: il/i nome/i comunicati dall'acquirente al
+        # checkout (order.holder_names) devono comparire nel testo del PDF
+        # ricaricato, altrimenti il cambio nominativo non è stato fatto
+        # davvero (es. il venditore ha rigenerato solo sigillo/hash ma non ha
+        # effettivamente intestato il biglietto al nuovo nome). Saltato se il
+        # cambio nominativo non era richiesto per questo ordine (fee=0) o con
+        # TIXY_CHANGE_NAME_ENABLED=False (test), o se l'acquirente non ha
+        # comunicato nominativi (biglietto lasciato senza intestazione).
+        if name_change_enabled:
+            holder_names = [n.strip() for n in (order.holder_names or []) if n and n.strip()]
+            if holder_names and delivery_text.strip():
+                if not any(_name_in_text(name, delivery_text) for name in holder_names):
+                    return Response(
+                        {"detail": "il nominativo richiesto per il cambio nome non risulta presente nel PDF caricato: "
+                                   "verifica di aver riportato il nome corretto sul biglietto"},
+                        status=400,
+                    )
 
         # --- Controllo soft sui sigilli fiscali: se il PDF caricato contiene ---
         # gli stessi sigilli dell'originale, il biglietto non è stato rinominato.
